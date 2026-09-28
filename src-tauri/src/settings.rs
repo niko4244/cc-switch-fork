@@ -374,6 +374,11 @@ pub struct AppSettings {
     /// Whether to show the failover toggle independently on the main page
     #[serde(default)]
     pub enable_failover_toggle: bool,
+    /// Under failover, try the selected provider first and fall back to the queue.
+    /// Default true: the selection is the user's explicit intent, the queue is only
+    /// a fallback. Set false to restore the legacy "failover jumps straight to P1".
+    #[serde(default = "default_true")]
+    pub failover_prefers_selected: bool,
     /// Whether to show the project profile switcher on the main page header
     #[serde(default = "default_show_profile_switcher")]
     pub show_profile_switcher: bool,
@@ -517,6 +522,7 @@ impl Default for AppSettings {
             usage_confirmed: None,
             usage_dashboard_refresh_interval_ms: None,
             enable_failover_toggle: false,
+            failover_prefers_selected: true,
             show_profile_switcher: true,
             preserve_codex_official_auth_on_switch: false,
             unify_codex_session_history: false,
@@ -1024,6 +1030,19 @@ pub fn get_effective_current_provider(
 
     // Fallback 到数据库的 is_current
     db.get_current_provider(app_type.as_str())
+}
+
+/// 故障转移时是否优先使用当前选中的供应商（默认 true）
+///
+/// 见 docs/DESIGN-routing-mode.md §6.1：关闭后恢复“故障转移直接跳到 P1”的旧行为。
+pub fn failover_prefers_selected() -> bool {
+    settings_store()
+        .read()
+        .map(|s| s.failover_prefers_selected)
+        .unwrap_or_else(|e| {
+            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            e.into_inner().failover_prefers_selected
+        })
 }
 
 // ===== Skill 同步方式管理函数 =====

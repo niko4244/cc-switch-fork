@@ -7,7 +7,7 @@ use crate::database::Database;
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -29,11 +29,27 @@ impl ProviderRouter {
         }
     }
 
+    /// 解析当前选中的供应商 ID
+    ///
+    /// 优先使用本地 settings（会校验 ID 是否仍存在），失效时回落到数据库的 `is_current`。
+    fn resolve_selected_provider_id(&self, app_type: &str) -> Option<String> {
+        AppType::from_str(app_type)
+            .ok()
+            .and_then(|app_enum| {
+                crate::settings::get_effective_current_provider(&self.db, &app_enum)
+                    .ok()
+                    .flatten()
+            })
+            .or_else(|| self.db.get_current_provider(app_type).ok().flatten())
+    }
+
     /// 选择可用的供应商（支持故障转移）
     ///
     /// 返回按优先级排序的可用供应商列表：
     /// - 故障转移关闭时：仅返回当前供应商
-    /// - 故障转移开启时：仅使用故障转移队列，按队列顺序依次尝试（P1 → P2 → ...）
+    /// - 故障转移开启时：先试当前选中的供应商，再按故障转移队列顺序依次尝试
+    ///   （选中项 → P1 → P2 → ...）。`failoverPrefersSelected = false` 时恢复旧行为，
+    ///   仅按队列顺序（P1 → P2 → ...）。见 docs/DESIGN-routing-mode.md §6.1
     pub async fn select_providers(&self, app_type: &str) -> Result<Vec<Provider>, AppError> {
         let mut result = Vec::new();
         let mut total_providers = 0usize;
@@ -49,16 +65,28 @@ impl ProviderRouter {
         };
 
         if auto_failover_enabled {
-            // 故障转移开启：仅按队列顺序依次尝试（P1 → P2 → ...）
+            // 故障转移开启：先试当前选中的供应商，再按队列顺序依次尝试
             let all_providers = self.db.get_all_providers(app_type)?;
 
+            let prefers_selected = crate::settings::failover_prefers_selected();
+            let mut ordered_ids: Vec<String> = Vec::new();
+            let mut seen: HashSet<String> = HashSet::new();
+
+            // 选中的供应商排在最前：选择是用户的明确意图，队列只是兵底
+            if prefers_selected {
+                if let Some(selected_id) = self.resolve_selected_provider_id(app_type) {
+                    log::info!("[{app_type}] 故障转移：优先使用选中的供应商 {selected_id}");
+                    seen.insert(selected_id.clone());
+                    ordered_ids.push(selected_id);
+                }
+            }
+
             // 使用 DAO 返回的排序结果，确保和前端展示一致
-            let ordered_ids: Vec<String> = self
-                .db
-                .get_failover_queue(app_type)?
-                .into_iter()
-                .map(|item| item.provider_id)
-                .collect();
+            for item in self.db.get_failover_queue(app_type)? {
+                if seen.insert(item.provider_id.clone()) {
+                    ordered_ids.push(item.provider_id);
+                }
+            }
 
             total_providers = ordered_ids.len();
 
@@ -78,14 +106,7 @@ impl ProviderRouter {
             }
         } else {
             // 故障转移关闭：仅使用当前供应商，跳过熔断器检查
-            let current_id = AppType::from_str(app_type)
-                .ok()
-                .and_then(|app_enum| {
-                    crate::settings::get_effective_current_provider(&self.db, &app_enum)
-                        .ok()
-                        .flatten()
-                })
-                .or_else(|| self.db.get_current_provider(app_type).ok().flatten());
+            let current_id = self.resolve_selected_provider_id(app_type);
 
             if let Some(current_id) = current_id {
                 if let Some(current) = self.db.get_provider_by_id(&current_id, app_type)? {
@@ -103,6 +124,10 @@ impl ProviderRouter {
                 log::warn!("[{app_type}] [FO-005] 未配置供应商");
                 return Err(AppError::NoProvidersConfigured);
             }
+        }
+
+        if let Some(winner) = result.first() {
+            log::info!("[{app_type}] 本次请求目标供应商: {} ({})", winner.id, winner.name);
         }
 
         Ok(result)
@@ -362,11 +387,11 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_failover_enabled_uses_queue_order_ignoring_current() {
+    async fn test_failover_enabled_prefers_selected_then_queue() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
 
-        // 设置 sort_index 来控制顺序：b=1, a=2
+        // 设置 sort_index 来控制队列顺序：b=1, a=2
         let mut provider_a =
             Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
         provider_a.sort_index = Some(2);
@@ -389,15 +414,15 @@ mod tests {
         let router = ProviderRouter::new(db.clone());
         let providers = router.select_providers("claude").await.unwrap();
 
+        // 选中的 a 排最前，队列里的 a 被去重，不会出现两次
         assert_eq!(providers.len(), 2);
-        // 故障转移开启时：仅按队列顺序选择（忽略当前供应商）
-        assert_eq!(providers[0].id, "b");
-        assert_eq!(providers[1].id, "a");
+        assert_eq!(providers[0].id, "a");
+        assert_eq!(providers[1].id, "b");
     }
 
     #[tokio::test]
     #[serial]
-    async fn test_failover_enabled_uses_queue_only_even_if_current_not_in_queue() {
+    async fn test_failover_enabled_includes_selected_even_when_not_in_queue() {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
 
@@ -421,8 +446,84 @@ mod tests {
         let router = ProviderRouter::new(db.clone());
         let providers = router.select_providers("claude").await.unwrap();
 
+        // 选中的 a 会被补进候选，排在队列 b 前面
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].id, "a");
+        assert_eq!(providers[1].id, "b");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_failover_legacy_queue_only_when_prefers_selected_disabled() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        // 关闭 failoverPrefersSelected，恢复“故障转移直接跳到 P1”的旧行为
+        let mut settings = crate::settings::get_settings();
+        settings.failover_prefers_selected = false;
+        crate::settings::update_settings(settings).unwrap();
+        assert!(!crate::settings::failover_prefers_selected());
+
+        let provider_a =
+            Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+        let mut provider_b =
+            Provider::with_id("b".to_string(), "Provider B".to_string(), json!({}), None);
+        provider_b.sort_index = Some(1);
+
+        db.save_provider("claude", &provider_a).unwrap();
+        db.save_provider("claude", &provider_b).unwrap();
+        db.set_current_provider("claude", "a").unwrap();
+        db.add_to_failover_queue("claude", "b").unwrap();
+
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("claude").await.unwrap();
+
+        // 逃生舱生效：选中的 a 被忽略，仅按队列
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "b");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_failover_prefers_selected_defaults_to_true() {
+        let _home = TempHome::new();
+        assert!(crate::settings::failover_prefers_selected());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_failover_enabled_falls_back_to_queue_when_no_selection() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let provider_a =
+            Provider::with_id("a".to_string(), "Provider A".to_string(), json!({}), None);
+        let provider_b =
+            Provider::with_id("b".to_string(), "Provider B".to_string(), json!({}), None);
+
+        db.save_provider("claude", &provider_a).unwrap();
+        db.save_provider("claude", &provider_b).unwrap();
+        // 没有任何选中项（save_provider 默认 is_current = 0）
+        assert!(db.get_current_provider("claude").unwrap().is_none());
+
+        db.add_to_failover_queue("claude", "a").unwrap();
+        db.add_to_failover_queue("claude", "b").unwrap();
+
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("claude").await.unwrap();
+
+        // 没有选中项时直接用队列，不报错
+        assert_eq!(providers.len(), 2);
+        assert_eq!(providers[0].id, "a");
+        assert_eq!(providers[1].id, "b");
     }
 
     #[tokio::test]
