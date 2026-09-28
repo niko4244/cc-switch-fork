@@ -730,6 +730,20 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
+            // Idempotent provider-state repair: duplicate `category = "official"`
+            // rows are merged by login freshness so "switch back to official"
+            // never lands on a stale login. See DESIGN-routing-mode.md §6.2.
+            match app_state
+                .db
+                .repair_provider_state(crate::database::RepairScope::STARTUP)
+            {
+                Ok(report) if !report.is_noop() => {
+                    log::info!("✓ Repaired provider state on startup: {report:?}");
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("✗ Provider state repair failed: {e}"),
+            }
+
             {
                 let db_for_codex_history_migration = app_state.db.clone();
                 tauri::async_runtime::spawn_blocking(move || {

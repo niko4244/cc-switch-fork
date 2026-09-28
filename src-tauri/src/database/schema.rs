@@ -511,6 +511,11 @@ impl Database {
                         Self::migrate_v15_to_v16(conn)?;
                         Self::set_user_version(conn, 16)?;
                     }
+                    16 => {
+                        log::info!("迁移数据库从 v16 到 v17（修复供应商路由状态）");
+                        Self::migrate_v16_to_v17(conn)?;
+                        Self::set_user_version(conn, 17)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -1521,6 +1526,28 @@ impl Database {
     fn migrate_v15_to_v16(conn: &Connection) -> Result<(), AppError> {
         let codex_dir = crate::codex_config::get_codex_config_dir();
         crate::services::session_usage_codex::reset_codex_usage_on_conn(conn, &codex_dir)
+    }
+
+    /// v16 -> v17: repair provider routing state.
+    ///
+    /// Merges duplicate `category = "official"` rows per app by login freshness
+    /// (the row with the newest `auth.last_refresh` supplies the login, the
+    /// built-in seed row keeps its id), collapses stray `is_current` flags, and
+    /// clears failover queues for apps whose failover is off.
+    /// See `docs/DESIGN-routing-mode.md` §6.2 / §8.
+    fn migrate_v16_to_v17(conn: &Connection) -> Result<(), AppError> {
+        let report = crate::database::repair_provider_state_on_conn(
+            conn,
+            crate::database::RepairScope::MIGRATION,
+        )?;
+
+        if report.is_noop() {
+            log::info!("✓ v17 供应商状态修复：无需处理");
+        } else {
+            log::info!("✓ v17 供应商状态修复完成：{report:?}");
+        }
+
+        Ok(())
     }
 
     /// 插入默认模型定价数据
@@ -3222,7 +3249,7 @@ mod tests {
 
         Database::apply_schema_migrations_on_conn(&conn)?;
 
-        assert_eq!(Database::get_user_version(&conn)?, 16);
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
         let counts: (i64, i64, i64, i64) = conn.query_row(
             "SELECT
                 (SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'codex_session'),

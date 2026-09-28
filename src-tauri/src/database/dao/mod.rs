@@ -7,6 +7,7 @@ pub mod mcp;
 pub mod profiles;
 pub mod prompts;
 pub mod providers;
+pub mod providers_repair;
 pub mod providers_seed;
 pub mod proxy;
 pub mod settings;
