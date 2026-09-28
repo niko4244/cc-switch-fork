@@ -1,4 +1,17 @@
 {
+"routing": {
+  "label": "Routing",
+  "groupLabel": "{{app}} routing mode",
+  "native": "Native",
+  "selected": "Selected",
+  "failover": "Failover",
+  "changeFailed": "Could not change {{app}} routing",
+  "description": {
+    "native": "{{app}} uses its own sign-in. cc-switch does not change its configuration.",
+    "selected": "Send {{app}} requests through cc-switch to the provider you select.",
+    "failover": "Send {{app}} requests through the failover queue, highest priority first."
+  }
+},
   "app": {
     "title": "CC Switch",
     "description": "All-in-One Assistant for Claude Code, Codex & Gemini CLI"

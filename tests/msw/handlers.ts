@@ -345,6 +345,11 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/is_live_takeover_active`, () => success(false)),
 
   // Failover / circuit breaker defaults
+  // RoutingModeControl always mounts in the provider header, so the failover flag
+  // is now read on every app view rather than only when the (default-off)
+  // failover switch was enabled.
+  http.post(`${TAURI_ENDPOINT}/get_auto_failover_enabled`, () => success(false)),
+  http.post(`${TAURI_ENDPOINT}/set_auto_failover_enabled`, () => success(true)),
   http.post(`${TAURI_ENDPOINT}/get_failover_queue`, () => success([])),
   http.post(`${TAURI_ENDPOINT}/get_available_providers_for_failover`, () =>
     success([]),

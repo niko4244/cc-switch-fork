@@ -65,9 +65,8 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { UpdateBadge } from "@/components/UpdateBadge";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
-import { ProxyToggle } from "@/components/proxy/ProxyToggle";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
-import { FailoverToggle } from "@/components/proxy/FailoverToggle";
+import { RoutingModeControl } from "@/components/proxy/RoutingModeControl";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
 import PromptPanel from "@/components/prompts/PromptPanel";
@@ -1254,16 +1253,16 @@ function App() {
                   style={{ WebkitAppRegion: "no-drag" } as any}
                 >
                   {activeApp === "claude-desktop" ? (
+                    // claude-desktop has no proxy takeover in the backend, so it
+                    // cannot offer a native/selected choice yet. It keeps its own
+                    // route toggle until takeover support lands for it - see
+                    // docs/DESIGN-routing-mode.md section 4.
                     <ClaudeDesktopRouteToggle />
                   ) : (
                     settingsData?.enableLocalProxy && (
-                      <ProxyToggle activeApp={activeApp} />
+                      <RoutingModeControl activeApp={activeApp} />
                     )
                   )}
-                  {activeApp !== "claude-desktop" &&
-                    settingsData?.enableFailoverToggle && (
-                      <FailoverToggle activeApp={activeApp} />
-                    )}
                 </div>
               )}
             {currentView === "providers" &&

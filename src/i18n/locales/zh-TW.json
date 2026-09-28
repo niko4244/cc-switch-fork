@@ -1,4 +1,17 @@
 {
+"routing": {
+  "label": "路由",
+  "groupLabel": "{{app}} 路由模式",
+  "native": "原生",
+  "selected": "指定供應商",
+  "failover": "故障轉移",
+  "changeFailed": "無法變更 {{app}} 的路由",
+  "description": {
+    "native": "{{app}} 使用自身的登入憑證，cc-switch 不會修改其設定。",
+    "selected": "將 {{app}} 的請求透過 cc-switch 傳送給你選取的供應商。",
+    "failover": "將 {{app}} 的請求依故障轉移佇列傳送，優先級最高者先用。"
+  }
+},
   "app": {
     "title": "CC Switch",
     "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"

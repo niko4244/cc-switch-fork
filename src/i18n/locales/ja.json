@@ -1,4 +1,17 @@
 {
+"routing": {
+  "label": "ルーティング",
+  "groupLabel": "{{app}} のルーティングモード",
+  "native": "ネイティブ",
+  "selected": "選択したプロバイダー",
+  "failover": "フェイルオーバー",
+  "changeFailed": "{{app}} のルーティングを変更できませんでした",
+  "description": {
+    "native": "{{app}} は自身のサインインを使用し、cc-switch は設定を変更しません。",
+    "selected": "{{app}} のリクエストを選択したプロバイダーへ cc-switch 経由で送信します。",
+    "failover": "{{app}} のリクエストをフェイルオーバーキュー（優先度順）に送信します。"
+  }
+},
   "app": {
     "title": "CC Switch",
     "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"
