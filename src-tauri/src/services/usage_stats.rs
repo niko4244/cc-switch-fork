@@ -2057,7 +2057,13 @@ pub(crate) fn find_model_pricing_row(
     // 剥掉，免费别名于是可能命中付费价表行（如 `stepfun/step-3.7-flash:free` 命中
     // `step-3.7-flash` 的列表价），既不是真实成本，也把免费档算成了付费。查不到价
     // 时的省略路径同样不对：那会写下一个来源不明的 0 并刷 USG-002。
+    //
+    // 唯一的例外：价表里有一行与原始模型名（含 `:free`）逐字相同，那是运维为这个
+    // 免费别名手工定的价，优先于免费规则。归一化后才命中的同名付费行不算。
     if is_confirmed_free_model(model_id) {
+        if let Some(row) = query_model_pricing_exact(conn, model_id.trim())? {
+            return Ok(Some(row));
+        }
         log::debug!("[USG-005] 上游明示免费，显式记 0: {model_id}");
         return Ok(Some((
             "0".to_string(),
@@ -4380,6 +4386,22 @@ mod tests {
         let (paid_input, ..) =
             find_model_pricing_row(&conn, "step-3.7-flash")?.expect("付费变体仍按自身定价行计价");
         assert_eq!(paid_input, "0.1");
+
+        // 运维为免费别名逐字定的价优先于免费规则；归一化后的付费行仍被挡住。
+        conn.execute(
+            "INSERT OR REPLACE INTO model_pricing (
+                model_id, display_name, input_cost_per_million, output_cost_per_million,
+                cache_read_cost_per_million, cache_creation_cost_per_million
+            ) VALUES ('stepfun/step-3.7-flash:free', 'Step 3.7 Flash (manual)', '0.05', '0.06', '0', '0')",
+            [],
+        )?;
+        let (manual_input, manual_output, ..) =
+            find_model_pricing_row(&conn, "stepfun/step-3.7-flash:free")?
+                .expect("逐字匹配的手工价表行必须被采用");
+        assert_eq!(
+            (manual_input.as_str(), manual_output.as_str()),
+            ("0.05", "0.06")
+        );
 
         Ok(())
     }
