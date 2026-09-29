@@ -4,6 +4,7 @@ import {
   Copy,
   ExternalLink,
   Github,
+  GitBranch,
   Globe,
   Info,
   Loader2,
@@ -40,8 +41,10 @@ import type { AppId } from "@/lib/api/types";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { isWindows } from "@/lib/platform";
 import { isUpdateAvailable } from "@/lib/version";
+import { describeForkBuild } from "@/lib/fork";
 import { ToolUpgradeConfirmDialog } from "./ToolUpgradeConfirmDialog";
 import { ToolInstallRow } from "./ToolInstallRow";
+import { ForkUpdateCard } from "./ForkUpdateCard";
 
 interface AboutSectionProps {
   isPortable: boolean;
@@ -238,8 +241,14 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   );
   const [showInstallCommands, setShowInstallCommands] = useState(false);
 
-  const { hasUpdate, updateInfo, checkUpdate, resetDismiss, isChecking } =
-    useUpdate();
+  const {
+    hasUpdate,
+    updateInfo,
+    checkUpdate,
+    resetDismiss,
+    isChecking,
+    forkInfo,
+  } = useUpdate();
 
   const [wslShellByTool, setWslShellByTool] = useState<
     Record<string, WslShellPreference>
@@ -858,6 +867,20 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                     {t("settings.portableMode")}
                   </Badge>
                 )}
+                {forkInfo && (
+                  <Badge
+                    variant="secondary"
+                    className="gap-1.5"
+                    title={describeForkBuild(forkInfo)}
+                    data-testid="about-fork-badge"
+                  >
+                    <GitBranch className="h-3 w-3" />
+                    {forkInfo.name}
+                    <span className="font-mono text-[10px] text-muted-foreground">
+                      {forkInfo.commit}
+                    </span>
+                  </Badge>
+                )}
               </div>
             </div>
           </div>
@@ -950,6 +973,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           </motion.div>
         )}
       </motion.div>
+
+      <ForkUpdateCard />
 
       <div className="space-y-3">
         <div className="flex flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">

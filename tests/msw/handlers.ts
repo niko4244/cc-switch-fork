@@ -19,6 +19,10 @@ import {
   setSettings,
   getAppConfigDirOverride,
   setAppConfigDirOverrideState,
+  getForkInfo,
+  getUpstreamRelease,
+  setForkInfo,
+  setLastForkPolicyCall,
   getMcpConfig,
   setMcpServerEnabled,
   upsertMcpServer,
@@ -212,6 +216,39 @@ export const handlers = [
   http.post(`${TAURI_ENDPOINT}/restart_app`, () => success(true)),
 
   http.post(`${TAURI_ENDPOINT}/get_settings`, () => success(getSettings())),
+
+  // ── fork identity + update pin ────────────────────────────────────────────
+  http.post(`${TAURI_ENDPOINT}/get_fork_info`, () => success(getForkInfo())),
+  http.post(`${TAURI_ENDPOINT}/get_fork_update_policy`, () =>
+    success({ mode: getForkInfo().updateMode }),
+  ),
+  http.post(`${TAURI_ENDPOINT}/set_fork_update_policy`, async ({ request }) => {
+    const body = await withJson<{
+      mode: "pinned" | "official";
+      acknowledge?: boolean;
+    }>(request);
+    setLastForkPolicyCall({
+      mode: body.mode,
+      acknowledge: body.acknowledge === true,
+    });
+    if (body.mode === "official" && body.acknowledge !== true) {
+      return new HttpResponse(
+        "FORK_ACK_REQUIRED: 切换到 official 更新通道需要显式确认",
+        { status: 400 },
+      );
+    }
+    setForkInfo({
+      updateMode: body.mode,
+      acknowledgedAt: body.mode === "official" ? "2026-09-29T00:00:00Z" : null,
+    });
+    return success({ mode: body.mode });
+  }),
+  http.post(`${TAURI_ENDPOINT}/check_upstream_changes`, () => {
+    const release = getUpstreamRelease();
+    return release
+      ? success(release)
+      : new HttpResponse("查询上游版本失败: HTTP 404", { status: 400 });
+  }),
 
   http.post(`${TAURI_ENDPOINT}/check_env_conflicts`, () => success([])),
 

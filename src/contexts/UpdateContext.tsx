@@ -8,6 +8,7 @@ import React, {
 } from "react";
 import type { UpdateInfo } from "../lib/updater";
 import { checkForUpdate } from "../lib/updater";
+import type { ForkInfo } from "../lib/fork";
 
 interface UpdateContextValue {
   // 更新状态
@@ -15,6 +16,9 @@ interface UpdateContextValue {
   updateInfo: UpdateInfo | null;
   isChecking: boolean;
   error: string | null;
+  /** 本地 fork 身份；pinned 时官方更新器不参与，因此 hasUpdate 恒为 false */
+  forkInfo: ForkInfo | null;
+  forkPinned: boolean;
 
   // 提示状态
   isDismissed: boolean;
@@ -36,6 +40,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
   const [isChecking, setIsChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isDismissed, setIsDismissed] = useState(false);
+  const [forkInfo, setForkInfo] = useState<ForkInfo | null>(null);
 
   // 从 localStorage 读取已关闭的版本
   useEffect(() => {
@@ -66,6 +71,15 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
 
     try {
       const result = await checkForUpdate({ timeout: 30000 });
+
+      if (result.status === "pinned") {
+        // fork 构建：官方更新器被策略停用，这里既没有可安装版本，也不应给出提示。
+        setForkInfo(result.fork);
+        setHasUpdate(false);
+        setUpdateInfo(null);
+        setIsDismissed(false);
+        return false;
+      }
 
       if (result.status === "available") {
         setHasUpdate(true);
@@ -131,6 +145,8 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     isChecking,
     error,
     isDismissed,
+    forkInfo,
+    forkPinned: forkInfo?.pinned ?? false,
     dismissUpdate,
     checkUpdate,
     resetDismiss,

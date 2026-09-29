@@ -202,9 +202,92 @@ let mcpConfigs: McpConfigState = {
 const cloneProviders = (value: ProvidersByApp) =>
   deepClone(value) as ProvidersByApp;
 
+// ── fork identity + update pin ──────────────────────────────────────────────
+// Mirrors the backend contract, including the derived fields: `pinned` and
+// `refusalCode` follow from `updateMode`, and `officialUpdaterRegistered` is an
+// observation the backend only reports true after a restart.
+export type ForkInfoFixture = {
+  isFork: boolean;
+  name: string;
+  bundleVersion: string;
+  forkVersion: string;
+  baseVersion: string;
+  baseCommit: string;
+  commit: string;
+  serial: number;
+  upstreamRepo: string;
+  upstreamUrl: string;
+  updateMode: "pinned" | "official";
+  acknowledgedAt: string | null;
+  pinned: boolean;
+  officialUpdaterRegistered: boolean;
+  refusalCode: string | null;
+};
+
+export type UpstreamReleaseFixture = {
+  tag: string;
+  version: string;
+  publishedAt: string | null;
+  htmlUrl: string | null;
+  notes: string | null;
+  isNewer: boolean;
+};
+
+const createDefaultForkInfo = (): ForkInfoFixture => ({
+  isFork: true,
+  name: "CC Switch Fork",
+  bundleVersion: "3.19.1",
+  forkVersion: "3.19.1+fork.1.03cbb56",
+  baseVersion: "3.19.1",
+  baseCommit: "2852962",
+  commit: "03cbb56",
+  serial: 1,
+  upstreamRepo: "farion1231/cc-switch",
+  upstreamUrl: "https://github.com/farion1231/cc-switch",
+  updateMode: "pinned",
+  acknowledgedAt: null,
+  pinned: true,
+  officialUpdaterRegistered: false,
+  refusalCode: "FORK_UPDATER_PINNED",
+});
+
+let forkInfoState = createDefaultForkInfo();
+let upstreamReleaseState: UpstreamReleaseFixture | null = null;
+let lastForkPolicyCall: { mode: string; acknowledge: boolean } | null = null;
+
+export const getForkInfo = () => deepClone(forkInfoState) as ForkInfoFixture;
+
+export const setForkInfo = (patch: Partial<ForkInfoFixture>) => {
+  forkInfoState = { ...forkInfoState, ...patch };
+  const pinned = forkInfoState.updateMode === "pinned";
+  forkInfoState.pinned = pinned;
+  forkInfoState.refusalCode = pinned ? "FORK_UPDATER_PINNED" : null;
+};
+
+export const setUpstreamRelease = (release: UpstreamReleaseFixture | null) => {
+  upstreamReleaseState =
+    release === null ? null : (deepClone(release) as UpstreamReleaseFixture);
+};
+
+export const getUpstreamRelease = () =>
+  upstreamReleaseState === null
+    ? null
+    : (deepClone(upstreamReleaseState) as UpstreamReleaseFixture);
+
+export const setLastForkPolicyCall = (
+  call: { mode: string; acknowledge: boolean } | null,
+) => {
+  lastForkPolicyCall = call;
+};
+
+export const getLastForkPolicyCall = () => lastForkPolicyCall;
+
 export const resetProviderState = () => {
   providers = createDefaultProviders();
   current = createDefaultCurrent();
+  forkInfoState = createDefaultForkInfo();
+  upstreamReleaseState = null;
+  lastForkPolicyCall = null;
   liveProviderIds = {
     opencode: [],
     openclaw: [],
