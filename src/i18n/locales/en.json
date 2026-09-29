@@ -17,7 +17,11 @@
       "noProvider": "no provider selected",
       "unknownProvider": "unknown provider",
       "selectionIgnored": "selection ignored",
-      "selectionIgnoredHint": "Failover is routing this app down the queue, so the provider you selected is not in use."
+      "selectionIgnoredHint": "Failover is routing this app down the queue, so the provider you selected is not in use.",
+      "confirmedJustNow": "confirmed just now",
+      "confirmedAgo": "confirmed {{age}} ago",
+      "stale": "last seen {{age}} ago",
+      "staleHint": "Nothing has been routed for this app recently, so this may no longer be the route in use."
     },
     "error": {
       "noProviders": "No provider to route to ({{code}}). Pick one, or add one to the failover queue.",

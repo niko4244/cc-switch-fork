@@ -18,7 +18,11 @@ import { useTranslation } from "react-i18next";
 
 import { useProvidersQuery } from "@/lib/query/queries";
 import { useActiveRoute } from "@/lib/query/routing";
-import type { RoutingMode } from "@/lib/routing-mode";
+import {
+  describeRouteAge,
+  isRouteStale,
+  type RoutingMode,
+} from "@/lib/routing-mode";
 import { cn } from "@/lib/utils";
 import type { AppId } from "@/lib/api/types";
 
@@ -68,8 +72,16 @@ export function RouteStatusStrip({
   // Decisions now survive a restart, so a record can be older than the current
   // intent: if the mode changed since it was written (or nothing was ever
   // routed), it no longer describes what will answer and must not be presented
-  // as the actual route.
-  const recorded = actual?.mode === mode ? actual : null;
+  // as the actual route. Same for a record we cannot date at all.
+  const recorded =
+    actual?.mode === mode && actual.lastConfirmedAt !== null ? actual : null;
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const confirmedAt = recorded?.lastConfirmedAt ?? null;
+  const routeAge =
+    confirmedAt === null ? null : describeRouteAge(confirmedAt, nowSeconds);
+  const routeIsStale =
+    confirmedAt !== null && isRouteStale(confirmedAt, nowSeconds);
 
   const predictedProviderId = providersData?.currentProviderId ?? "";
   const predictedProvider = providersData?.providers[predictedProviderId];
@@ -123,6 +135,34 @@ export function RouteStatusStrip({
       {isPredicted && (
         <span className="shrink-0 rounded bg-muted px-1 text-muted-foreground">
           {t("routing.status.predicted", { defaultValue: "predicted" })}
+        </span>
+      )}
+      {recorded && routeIsStale && (
+        // Stale reads as history, not as the current route, and it is toned like
+        // the other warnings so it cannot pass as a live answer.
+        <span
+          className="shrink-0 rounded bg-amber-500/15 px-1 text-amber-700 dark:text-amber-400"
+          title={t("routing.status.staleHint", {
+            defaultValue:
+              "Nothing has been routed for this app recently, so this may no longer be the route in use.",
+          })}
+        >
+          {t("routing.status.stale", {
+            age: routeAge,
+            defaultValue: "last seen {{age}} ago",
+          })}
+        </span>
+      )}
+      {recorded && !routeIsStale && (
+        <span className="shrink-0 text-muted-foreground">
+          {routeAge
+            ? t("routing.status.confirmedAgo", {
+                age: routeAge,
+                defaultValue: "confirmed {{age}} ago",
+              })
+            : t("routing.status.confirmedJustNow", {
+                defaultValue: "confirmed just now",
+              })}
         </span>
       )}
       {selectionIgnored && (

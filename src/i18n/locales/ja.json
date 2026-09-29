@@ -17,7 +17,11 @@
       "noProvider": "プロバイダー未選択",
       "unknownProvider": "不明なプロバイダー",
       "selectionIgnored": "選択は無視されます",
-      "selectionIgnoredHint": "フェイルオーバーがキューの順にルーティングするため、選択したプロバイダーは使用されません。"
+      "selectionIgnoredHint": "フェイルオーバーがキューの順にルーティングするため、選択したプロバイダーは使用されません。",
+      "confirmedJustNow": "たった今確認",
+      "confirmedAgo": "{{age}}前に確認",
+      "stale": "最終確認は{{age}}前",
+      "staleHint": "このアプリは最近ルーティングされていないため、この経路は現在使われていない可能性があります。"
     },
     "error": {
       "noProviders": "ルーティング先のプロバイダーがありません（{{code}}）。選択するか、フェイルオーバーキューに追加してください。",

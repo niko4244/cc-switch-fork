@@ -17,7 +17,7 @@ use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,12 +41,26 @@ pub struct ActiveRoute {
     pub selection_ignored: bool,
     /// 生效供应商发生变化的 Unix 秒级时间戳。
     pub last_switch_at: Option<i64>,
+    /// 路由器**最近一次**为该应用做出决定的时间（与是否切换供应商无关）。
+    ///
+    /// 这是「这条记录还算不算当前」的唯一依据。不能用 `last_switch_at` 代替：
+    /// 供应商不变时它不会更新，一条刚刚被确认过的路由会被误判成几天前的陈迹。
+    pub last_confirmed_at: Option<i64>,
     /// FO-004 / FO-005：最近一次路由失败的结构化错误码。
     pub last_error_code: Option<String>,
 }
 
 const PERSISTED_FILE_NAME: &str = "active-route.json";
-const PERSISTED_VERSION: u32 = 1;
+
+/// 缓存格式版本。v2 新增 `lastConfirmedAt`（旧文件直接作废重建，它只是缓存）。
+const PERSISTED_VERSION: u32 = 2;
+
+/// 「路由仍然有效」的心跳间隔。
+///
+/// 每个请求都精确记录确认时间的话，热路径上每次请求都要落盘；而确认时间只用来回答
+/// 「这条记录还算不算当前」，秒级精度没有意义。因此最多每 60 秒刷一次，代价是重启后
+/// 看到的时间最多偏小 60 秒 —— 对一个「是否过期」的判断完全够用。
+const CONFIRMATION_REFRESH_SECS: i64 = 60;
 
 /// 持久化格式的版本；不匹配时整份文件作废重建（它只是缓存，不是事实源）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +79,8 @@ struct RecordedRoute {
     upstream_base_url: Option<String>,
     selection_ignored: bool,
     last_switch_at: Option<i64>,
+    #[serde(default)]
+    last_confirmed_at: Option<i64>,
     /// 有意不落盘：错误码描述的是**本进程**的失败，跨重启复活成红色警告只会误导。
     #[serde(skip_serializing, default)]
     last_error_code: Option<String>,
@@ -80,6 +96,9 @@ fn registry() -> &'static RwLock<HashMap<String, RecordedRoute>> {
 /// 真实 `~/.cc-switch`。
 static PERSISTENCE_ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// 上次成功落盘的 Unix 秒级时间戳，用于心跳节流（`CONFIRMATION_REFRESH_SECS`）。
+static LAST_PERSIST_AT: AtomicI64 = AtomicI64::new(i64::MIN);
+
 /// 允许读写 `<配置目录>/active-route.json`。幂等。
 pub fn enable_persistence() {
     PERSISTENCE_ENABLED.store(true, Ordering::Relaxed);
@@ -87,6 +106,35 @@ pub fn enable_persistence() {
 
 fn persistence_enabled() -> bool {
     PERSISTENCE_ENABLED.load(Ordering::Relaxed)
+}
+
+fn last_persist_at() -> Option<i64> {
+    match LAST_PERSIST_AT.load(Ordering::Relaxed) {
+        i64::MIN => None,
+        value => Some(value),
+    }
+}
+
+/// 两个记录是否代表**不同的决策**。
+///
+/// 比较时忽略 `last_confirmed_at`：它每个请求都会变，如果算进差异，热路径上每个请求
+/// 都会写盘 —— 而这正是「只在变化时落盘」想避免的。
+fn decision_differs(previous: &RecordedRoute, next: &RecordedRoute) -> bool {
+    let mut comparable = next.clone();
+    comparable.last_confirmed_at = previous.last_confirmed_at;
+    comparable != *previous
+}
+
+/// 是否该落盘：决策变了，或者确认时间已经超过刷新窗口。
+///
+/// 抽成纯函数是因为「不改不变的东西」和「心跳到期」这两种触发条件的区别很容易写错，
+/// 而它们决定了热路径上是否会每个请求都写一次磁盘。
+fn should_persist(decision_changed: bool, last_persist_at: Option<i64>, now: i64) -> bool {
+    if decision_changed {
+        return true;
+    }
+
+    last_persist_at.map_or(true, |at| now.saturating_sub(at) >= CONFIRMATION_REFRESH_SECS)
 }
 
 fn persisted_file_path() -> PathBuf {
@@ -111,7 +159,9 @@ pub fn record_selection(
     selection_ignored: bool,
     upstream_base_url: Option<String>,
 ) {
-    let changed = {
+    let now = now_unix_secs();
+
+    let (decision_changed, last_persist) = {
         let Ok(mut routes) = registry().write() else {
             log::warn!("[{app_type}] active-route 注册表写入锁中毒，跳过本次路由记录");
             return;
@@ -120,7 +170,7 @@ pub fn record_selection(
         let previous = routes.remove(app_type).unwrap_or_default();
         let switched = previous.effective_provider_id.as_deref() != Some(provider.id.as_str());
         let last_switch_at = if switched {
-            Some(now_unix_secs())
+            Some(now)
         } else {
             previous.last_switch_at
         };
@@ -132,18 +182,19 @@ pub fn record_selection(
             upstream_base_url,
             selection_ignored,
             last_switch_at,
+            last_confirmed_at: Some(now),
             // 一次成功的选择清掉上一次的结构化错误。
             last_error_code: None,
         };
 
-        let changed = recorded != previous;
+        let decision_changed = decision_differs(&previous, &recorded);
+
         routes.insert(app_type.to_string(), recorded);
-        changed
+        (decision_changed, last_persist_at())
     };
 
-    // 落盘只发生在**决策真的变了**的时候：`select_providers` 是每个请求的热路径，
-    // 而「同一个供应商继续服务」是绝大多数请求的结果。
-    if changed {
+    // `select_providers` 是每个请求的热路径：只有决策真的变了，或心跳到期时才写盘。
+    if should_persist(decision_changed, last_persist, now) {
         write_through();
     }
 }
@@ -175,6 +226,7 @@ pub fn snapshot(app_type: &str) -> Option<ActiveRoute> {
         upstream_base_url: recorded.upstream_base_url.clone(),
         selection_ignored: recorded.selection_ignored,
         last_switch_at: recorded.last_switch_at,
+        last_confirmed_at: recorded.last_confirmed_at,
         last_error_code: recorded.last_error_code.clone(),
     })
 }
@@ -237,6 +289,11 @@ fn load_from_path(path: &Path) -> usize {
     }
 
     if loaded > 0 {
+        // 刚读回来的心跳时间也要认：否则启动后第一个请求会立刻又写一次。
+        let newest = routes.values().filter_map(|route| route.last_confirmed_at).max();
+        if let Some(newest) = newest {
+            LAST_PERSIST_AT.store(newest, Ordering::Relaxed);
+        }
         log::info!("✓ 恢复 {loaded} 条上次运行的路由记录");
     }
     loaded
@@ -252,6 +309,7 @@ fn write_through() {
         Err(_) => return,
     };
 
+    LAST_PERSIST_AT.store(now_unix_secs(), Ordering::Relaxed);
     write_or_remove(&persisted_file_path(), &routes);
 }
 
@@ -394,8 +452,85 @@ mod tests {
             upstream_base_url: Some("https://relay.example.com/v1".to_string()),
             selection_ignored: true,
             last_switch_at: Some(1_790_000_000),
+            last_confirmed_at: Some(1_790_000_010),
             last_error_code: None,
         }
+    }
+
+    /// 落盘时机：热路径上绝不能每个请求都写盘，但心跳必须能到期。
+    #[test]
+    fn persisting_happens_on_change_or_on_the_heartbeat() {
+        let now = 1_790_000_000;
+
+        assert!(should_persist(true, None, now), "a change always persists");
+        assert!(should_persist(false, None, now), "nothing written yet");
+
+        assert!(
+            !should_persist(false, Some(now), now),
+            "the same decision again must not touch the disk"
+        );
+        assert!(!should_persist(
+            false,
+            Some(now - CONFIRMATION_REFRESH_SECS + 1),
+            now
+        ));
+        assert!(
+            should_persist(false, Some(now - CONFIRMATION_REFRESH_SECS), now),
+            "the heartbeat must eventually refresh the confirmation time"
+        );
+
+        // A clock that jumped backwards waits instead of refreshing: the reported
+        // age may then look older than reality, never fresher, and the heartbeat
+        // resumes as soon as the clock catches up.
+        assert!(!should_persist(false, Some(now + 5), now));
+    }
+
+    /// 确认时间必须跟着**每一个**请求走，而不是只在切换时更新。
+    #[test]
+    fn the_confirmation_time_tracks_every_request() {
+        let app = "active-route-test-confirmed-at";
+        let provider = provider("p1", "Provider One");
+
+        record_selection(app, MODE_SELECTED, &provider, false, None);
+        let first = snapshot(app).unwrap();
+        assert_eq!(first.last_confirmed_at, first.last_switch_at);
+
+        // Same provider: the switch time must stay put while the confirmation
+        // time advances — this is why `lastConfirmedAt` cannot reuse
+        // `lastSwitchAt`.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        record_selection(app, MODE_SELECTED, &provider, false, None);
+        let second = snapshot(app).unwrap();
+        assert_eq!(second.last_switch_at, first.last_switch_at);
+        assert!(second.last_confirmed_at > first.last_confirmed_at);
+
+        clear(app);
+    }
+
+    /// 确认时间每次请求都会变，所以它不能算作「决策变了」——否则热路径上每个请求写一次盘。
+    #[test]
+    fn a_new_confirmation_time_is_not_a_new_decision() {
+        let before = recorded("p1");
+
+        let mut same_decision = before.clone();
+        same_decision.last_confirmed_at = before.last_confirmed_at.map(|at| at + 3600);
+        assert!(!decision_differs(&before, &same_decision));
+
+        let mut switched = same_decision.clone();
+        switched.effective_provider_id = Some("p2".to_string());
+        switched.last_switch_at = Some(1_790_099_999);
+        assert!(decision_differs(&before, &switched));
+
+        let mut flipped_mode = same_decision.clone();
+        flipped_mode.mode = MODE_SELECTED.to_string();
+        assert!(decision_differs(&before, &flipped_mode));
+
+        let mut now_ignored = same_decision;
+        now_ignored.selection_ignored = !before.selection_ignored;
+        assert!(
+            decision_differs(&before, &now_ignored),
+            "the selection-ignored badge is part of the decision"
+        );
     }
 
     fn write_sample(path: &Path, app_type: &str, entry: RecordedRoute) {

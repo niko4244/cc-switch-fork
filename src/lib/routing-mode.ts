@@ -83,3 +83,42 @@ export function planRoutingModeChange(next: RoutingMode): RoutingModePlan {
 export function modeIgnoresSelection(next: RoutingMode): boolean {
   return next === "failover";
 }
+
+/**
+ * How long a recorded route still counts as confirmed.
+ *
+ * Past this the record is presented as history rather than as the current
+ * route: nothing has confirmed it recently, so it must not pass as current.
+ */
+export const ROUTE_STALE_AFTER_SECONDS = 5 * 60;
+
+/** Under this the age is not worth showing — the route is simply "just now". */
+export const ROUTE_FRESH_WITHIN_SECONDS = 10;
+
+/**
+ * Compact age of a confirmation, e.g. `42s`, `5m`, `3h`, `2d`.
+ *
+ * Returns `null` while the route is fresh enough that an age would be noise.
+ */
+export function describeRouteAge(
+  confirmedAtSeconds: number,
+  nowSeconds: number,
+): string | null {
+  const age = Math.max(0, Math.floor(nowSeconds - confirmedAtSeconds));
+  if (age < ROUTE_FRESH_WITHIN_SECONDS) return null;
+  if (age < 60) return `${age}s`;
+  if (age < 3600) return `${Math.floor(age / 60)}m`;
+  if (age < 86400) return `${Math.floor(age / 3600)}h`;
+  return `${Math.floor(age / 86400)}d`;
+}
+
+/**
+ * Whether a recorded route has gone unconfirmed for long enough that it must be
+ * shown as stale instead of as the route actually in use.
+ */
+export function isRouteStale(
+  confirmedAtSeconds: number,
+  nowSeconds: number,
+): boolean {
+  return nowSeconds - confirmedAtSeconds > ROUTE_STALE_AFTER_SECONDS;
+}

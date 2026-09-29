@@ -49,9 +49,15 @@ function route(overrides: Partial<ActiveRoute> = {}): ActiveRoute {
     upstreamBaseUrl: "http://127.0.0.1:4000/v1",
     selectionIgnored: false,
     lastSwitchAt: 1_700_000_000,
+    // Confirmed "now" unless a test says otherwise.
+    lastConfirmedAt: Math.floor(Date.now() / 1000),
     lastErrorCode: null,
     ...overrides,
   };
+}
+
+function agoSeconds(seconds: number): number {
+  return Math.floor(Date.now() / 1000) - seconds;
 }
 
 describe("RouteStatusStrip", () => {
@@ -116,6 +122,49 @@ describe("RouteStatusStrip", () => {
       await screen.findByText(/No provider to route to/),
     ).toBeInTheDocument();
     expect(screen.getByText(/\(FO-005\)/)).toBeInTheDocument();
+  });
+
+  it("shows how long ago the route was confirmed", async () => {
+    // 4m: old enough to have a unit, young enough to still count as current.
+    getActiveRoute.mockResolvedValue(
+      route({ lastConfirmedAt: agoSeconds(4 * 60 + 5) }),
+    );
+
+    renderStrip("failover");
+
+    expect(await screen.findByText("confirmed 4m ago")).toBeInTheDocument();
+    expect(screen.queryByText(/last seen/)).not.toBeInTheDocument();
+  });
+
+  it("says the route was confirmed just now while it is fresh", async () => {
+    getActiveRoute.mockResolvedValue(route({ lastConfirmedAt: agoSeconds(1) }));
+
+    renderStrip("failover");
+
+    expect(await screen.findByText("confirmed just now")).toBeInTheDocument();
+  });
+
+  it("demotes a long-unconfirmed route to history", async () => {
+    // The route restored from a previous run: its provider is known but nothing
+    // has confirmed it, so it must not read as the route currently in use.
+    getActiveRoute.mockResolvedValue(
+      route({ lastConfirmedAt: agoSeconds(6 * 3600) }),
+    );
+
+    renderStrip("failover");
+
+    expect(await screen.findByText("last seen 6h ago")).toBeInTheDocument();
+    expect(screen.queryByText(/confirmed/)).not.toBeInTheDocument();
+  });
+
+  it("treats an undated record as unconfirmed rather than trusting it", async () => {
+    getActiveRoute.mockResolvedValue(route({ lastConfirmedAt: null }));
+
+    renderStrip("failover");
+
+    expect(await screen.findByText("predicted")).toBeInTheDocument();
+    expect(screen.queryByText("LiteLLM Gateway")).not.toBeInTheDocument();
+    expect(screen.queryByText(/confirmed|last seen/)).not.toBeInTheDocument();
   });
 
   it("ignores a persisted route recorded under a different mode", async () => {

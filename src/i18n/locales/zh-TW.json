@@ -17,7 +17,11 @@
       "noProvider": "未選擇供應商",
       "unknownProvider": "未知供應商",
       "selectionIgnored": "選擇已被忽略",
-      "selectionIgnoredHint": "故障轉移正依佇列為此應用程式路由，你選取的供應商並未生效。"
+      "selectionIgnoredHint": "故障轉移正依佇列為此應用程式路由，你選取的供應商並未生效。",
+      "confirmedJustNow": "剛剛確認",
+      "confirmedAgo": "{{age}} 前確認",
+      "stale": "最後出現於 {{age}} 前",
+      "staleHint": "此應用程式近期沒有路由記錄，這條路可能已不再生效。"
     },
     "error": {
       "noProviders": "沒有可路由的供應商（{{code}}）。請選擇一個，或將其加入故障轉移佇列。",

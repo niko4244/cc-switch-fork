@@ -12,6 +12,14 @@ export interface ActiveRoute {
   selectionIgnored: boolean;
   /** Unix seconds of the last change of the effective provider. */
   lastSwitchAt: number | null;
+  /**
+   * Unix seconds of the last time the router decided anything for this app.
+   *
+   * This is the freshness signal, and it is *not* `lastSwitchAt`: that only
+   * moves when the provider changes, so a route serving steadily for days still
+   * has an ancient switch time.
+   */
+  lastConfirmedAt: number | null;
   /** FO-004 / FO-005 when the last routing attempt failed. */
   lastErrorCode: string | null;
 }
