@@ -196,6 +196,13 @@ pub async fn restart_app(app: AppHandle) -> Result<bool, String> {
 /// 这里把退出清理、安装和重启串在同一个后端流程中，避免依赖旧前端继续执行。
 #[tauri::command]
 pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> {
+    // The pin: 默认 pinned 时这里直接拒绝，任何上游产物都不会替换本地 fork 构建。
+    // 放在下载之前，避免先下载一个永远不会安装的安装包。
+    if let Some(refusal) = crate::fork::refuse_official_install() {
+        log::warn!("拒绝安装官方更新：{refusal}");
+        return Err(refusal);
+    }
+
     let updater = app
         .updater_builder()
         .build()
@@ -273,6 +280,16 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> 
 /// 升级无法解决，而不是让其反复尝试。
 #[tauri::command]
 pub async fn check_app_update_available(app: AppHandle) -> Result<Option<String>, String> {
+    // This command exists so the "database is too new" recovery screen can ask
+    // "would updating fix this?". Under the pin the honest answer is no: the
+    // build cannot self-update from upstream, so the caller takes the branch
+    // that says updating will not solve it, instead of offering a button that
+    // would be refused one click later.
+    if crate::fork::refuse_official_install().is_some() {
+        log::info!("fork 更新策略为 pinned，跳过官方更新可用性检查");
+        return Ok(None);
+    }
+
     let updater = app
         .updater_builder()
         .build()

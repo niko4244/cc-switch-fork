@@ -12,6 +12,7 @@ mod config;
 mod database;
 mod deeplink;
 mod error;
+mod fork;
 mod gemini_config;
 mod gemini_mcp;
 mod grok_config;
@@ -457,7 +458,11 @@ pub fn run() {
 
                 // 用户配置存在数据库中，数据库尚未打开时使用保守的 Info 级别。
                 log::set_max_level(log::LevelFilter::Info);
-                log::info!("=== CC Switch v{} started ===", env!("CARGO_PKG_VERSION"));
+                log::info!(
+                    "=== CC Switch v{} ({}) started ===",
+                    env!("CARGO_PKG_VERSION"),
+                    fork::fork_version_label()
+                );
             }
 
             // 首次读取覆盖路径时 logger 尚未可用；此处重放一次，
@@ -468,14 +473,37 @@ pub fn run() {
             set_windows_app_user_model_id(app.handle());
 
             // 注册 Updater 插件（桌面端）；放在 logger 之后，确保失败可诊断。
+            //
+            // 本地 fork 默认不注册：Windows 上 `update.install()` 会启动 NSIS
+            // 安装器并直接结束当前进程，一个上游版本就能静默替换掉这个打了补丁
+            // 的构建。策略为 pinned（默认，也是读取失败时的退化值）时插件根本不
+            // 注册，前端也就没有可调用的 `plugin:updater|*` 命令；只有用户在
+            // 设置里显式接管官方更新通道后，下次启动才会注册。
             #[cfg(desktop)]
             {
-                if let Err(e) = app
-                    .handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())
-                {
-                    // 若配置不完整（如缺少 pubkey），跳过 Updater 而不中断应用
-                    log::warn!("初始化 Updater 插件失败，已跳过：{e}");
+                let policy = fork::read_policy();
+                match fork::update_decision(&policy) {
+                    fork::UpdateDecision::RefusePinned => {
+                        log::info!(
+                            "Updater 插件未注册：fork 更新策略 pinned（{}），上游版本无法替换本构建",
+                            fork::fork_version_label()
+                        );
+                    }
+                    fork::UpdateDecision::AllowOfficial => {
+                        match app
+                            .handle()
+                            .plugin(tauri_plugin_updater::Builder::new().build())
+                        {
+                            Ok(()) => {
+                                fork::mark_updater_registered();
+                                log::warn!(
+                                    "Updater 插件已注册：fork 更新策略 official，官方更新可能替换本构建"
+                                );
+                            }
+                            // 若配置不完整（如缺少 pubkey），跳过 Updater 而不中断应用
+                            Err(e) => log::warn!("初始化 Updater 插件失败，已跳过：{e}"),
+                        }
+                    }
                 }
             }
 
@@ -1388,6 +1416,11 @@ pub fn run() {
             commands::install_update_and_restart,
             commands::check_app_update_available,
             commands::check_for_updates,
+            // Fork identity + updater pin
+            commands::get_fork_info,
+            commands::get_fork_update_policy,
+            commands::set_fork_update_policy,
+            commands::check_upstream_changes,
             commands::is_portable_mode,
             commands::copy_text_to_clipboard,
             commands::get_claude_plugin_status,

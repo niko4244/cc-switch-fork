@@ -1,6 +1,15 @@
 fn main() {
     tauri_build::build();
 
+    // Local fork identity: stamp the commit this binary was built from so the
+    // app can name the exact fork build it is running (and so a stale artifact
+    // is obvious in the UI). Falls back to "unknown" rather than failing a
+    // build when git is absent.
+    println!(
+        "cargo:rustc-env=CC_SWITCH_FORK_COMMIT={}",
+        fork_commit_stamp()
+    );
+
     // Windows: Embed Common Controls v6 manifest for test binaries
     //
     // When running `cargo test`, the generated test executables don't include
@@ -24,5 +33,55 @@ fn main() {
         // Avoid duplicate manifest resources in binary builds.
         println!("cargo:rustc-link-arg-bins=/MANIFEST:NO");
         println!("cargo:rerun-if-changed={}", manifest_path.display());
+    }
+}
+
+/// Short HEAD plus a `-dirty` marker, or `unknown` outside a git checkout.
+fn fork_commit_stamp() -> String {
+    let manifest_dir =
+        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+
+    // Re-stamp when HEAD moves so the embedded commit cannot go stale, but only
+    // for paths that exist: a printed `rerun-if-changed` for a missing file is
+    // just noise.
+    if let Some(repo) = manifest_dir.parent() {
+        for candidate in [
+            repo.join(".git").join("HEAD"),
+            repo.join(".git").join("index"),
+        ] {
+            if candidate.exists() {
+                println!("cargo:rerun-if-changed={}", candidate.display());
+            }
+        }
+    }
+
+    let Some(head) = run_git(&manifest_dir, &["rev-parse", "--short", "HEAD"]) else {
+        return "unknown".to_string();
+    };
+    let dirty = run_git(&manifest_dir, &["status", "--porcelain"])
+        .map(|status| !status.trim().is_empty())
+        .unwrap_or(false);
+
+    if dirty {
+        format!("{head}-dirty")
+    } else {
+        head
+    }
+}
+
+fn run_git(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        None
+    } else {
+        Some(stdout)
     }
 }
