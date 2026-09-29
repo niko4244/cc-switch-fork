@@ -13,18 +13,22 @@
 //!
 //! 仍然没有任何记录时返回 `None`，前端据此退回到「预测」展示。
 
+use crate::app_config::AppType;
+use crate::database::Database;
 use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `mode` 取值，与前端 `RoutingMode` 联合类型一致。
 ///
-/// 没有 `native`：只有被代理接管的请求才会经过路由器，因此「原生」不会被记录，
-/// `snapshot` 返回 `None` 即代表没有发生过代理路由。
+/// 路由器**不会**记录 `native`（只有被接管的请求才经过它），但当前输入可能是 native：
+/// 退出接管后历史记录就不再成立。
+pub const MODE_NATIVE: &str = "native";
 pub const MODE_SELECTED: &str = "selected";
 pub const MODE_FAILOVER: &str = "failover";
 
@@ -43,17 +47,21 @@ pub struct ActiveRoute {
     pub last_switch_at: Option<i64>,
     /// 路由器**最近一次**为该应用做出决定的时间（与是否切换供应商无关）。
     ///
-    /// 这是「这条记录还算不算当前」的唯一依据。不能用 `last_switch_at` 代替：
-    /// 供应商不变时它不会更新，一条刚刚被确认过的路由会被误判成几天前的陈迹。
+    /// 仅用于显示「多久之前」。它**不是**失效判据：应用空闲时时间照样流逝，
+    /// 一条完全有效的路由会被冤成陈迹。失效判据是 [`ActiveRoute::inputs_changed`]。
+    ///
+    /// 也不能用 `last_switch_at` 代替它：供应商不变时后者不会更新。
     pub last_confirmed_at: Option<i64>,
+    /// 产生这条记录的输入是否已经变了。**这才是「还算不算当前」的判据**。
+    pub inputs_changed: bool,
     /// FO-004 / FO-005：最近一次路由失败的结构化错误码。
     pub last_error_code: Option<String>,
 }
 
 const PERSISTED_FILE_NAME: &str = "active-route.json";
 
-/// 缓存格式版本。v2 新增 `lastConfirmedAt`（旧文件直接作废重建，它只是缓存）。
-const PERSISTED_VERSION: u32 = 2;
+/// 缓存格式版本。v3 新增 `inputs`（旧文件直接作废重建，它只是缓存）。
+const PERSISTED_VERSION: u32 = 3;
 
 /// 「路由仍然有效」的心跳间隔。
 ///
@@ -81,9 +89,31 @@ struct RecordedRoute {
     last_switch_at: Option<i64>,
     #[serde(default)]
     last_confirmed_at: Option<i64>,
+    /// 产生这次决策的输入；落盘后下次启动可以判断它是否仍然成立。
+    #[serde(default)]
+    inputs: DecisionInputs,
     /// 有意不落盘：错误码描述的是**本进程**的失败，跨重启复活成红色警告只会误导。
     #[serde(skip_serializing, default)]
     last_error_code: Option<String>,
+}
+
+/// 决定「谁会应答」的输入集合。
+///
+/// 任何一项变化都说明旧记录不再代表当前会走的路。用输入而不是时间判断失效，
+/// 是因为时间会因应用空闲而白白流逝：没有请求就没有新记录，但路由依然有效。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DecisionInputs {
+    /// 接管后的实际模式（native / selected / failover）。
+    pub mode: String,
+    /// 当前选中的供应商。
+    pub selected_provider_id: Option<String>,
+    /// 故障转移队列顺序。
+    pub failover_queue: Vec<String>,
+    /// `failoverPrefersSelected`：决定选中项是否排在队列前面。
+    pub prefers_selected: bool,
+    /// 生效供应商**当前**的上游地址：供应商配置被改过时会与记录不一致。
+    pub effective_base_url: Option<String>,
 }
 
 fn registry() -> &'static RwLock<HashMap<String, RecordedRoute>> {
@@ -158,6 +188,7 @@ pub fn record_selection(
     provider: &Provider,
     selection_ignored: bool,
     upstream_base_url: Option<String>,
+    inputs: DecisionInputs,
 ) {
     let now = now_unix_secs();
 
@@ -183,6 +214,7 @@ pub fn record_selection(
             selection_ignored,
             last_switch_at,
             last_confirmed_at: Some(now),
+            inputs,
             // 一次成功的选择清掉上一次的结构化错误。
             last_error_code: None,
         };
@@ -214,7 +246,10 @@ pub fn record_error(app_type: &str, code: &str) {
 }
 
 /// 读取指定应用最近一次路由决策；从未路由过时返回 `None`。
-pub fn snapshot(app_type: &str) -> Option<ActiveRoute> {
+///
+/// `current_inputs` 是**当前**配置下的输入，用来判断记录是否已经失效：
+/// 传 `None` 表示不做校验（调用方拿不到当前配置），此时 `inputs_changed` 为 false。
+pub fn snapshot(app_type: &str, current_inputs: Option<&DecisionInputs>) -> Option<ActiveRoute> {
     let routes = registry().read().ok()?;
     let recorded = routes.get(app_type)?;
 
@@ -227,7 +262,69 @@ pub fn snapshot(app_type: &str) -> Option<ActiveRoute> {
         selection_ignored: recorded.selection_ignored,
         last_switch_at: recorded.last_switch_at,
         last_confirmed_at: recorded.last_confirmed_at,
+        inputs_changed: current_inputs.is_some_and(|current| *current != recorded.inputs),
         last_error_code: recorded.last_error_code.clone(),
+    })
+}
+
+/// 读出记录并用**当前**配置校验它。存在记录时返回带 `inputs_changed` 的视图。
+///
+/// 这是给 `get_active_route` 用的入口：调用方不需要知道校验细节（记录里的生效
+/// 供应商要先去查一下它的当前上游地址）。
+pub async fn verified_snapshot(db: &Database, app_type: &str) -> Option<ActiveRoute> {
+    let recorded_provider = {
+        let routes = registry().read().ok()?;
+        routes.get(app_type)?.effective_provider_id.clone()
+    };
+
+    let inputs = current_inputs(db, app_type, recorded_provider.as_deref()).await;
+    snapshot(app_type, inputs.as_ref())
+}
+
+/// 读出**当前**配置下的决策输入，用于校验一条历史记录。
+///
+/// `effective_provider_id` 是记录里的生效供应商（可能已经不在了）：只有它才能回答
+/// 「同一个供应商现在的上游地址还是那个吗」。
+pub async fn current_inputs(
+    db: &Database,
+    app_type: &str,
+    effective_provider_id: Option<&str>,
+) -> Option<DecisionInputs> {
+    let config = db.get_proxy_config_for_app(app_type).await.ok()?;
+    let mode = if !config.enabled {
+        MODE_NATIVE
+    } else if config.auto_failover_enabled {
+        MODE_FAILOVER
+    } else {
+        MODE_SELECTED
+    };
+
+    let failover_queue = db
+        .get_failover_queue(app_type)
+        .map(|queue| queue.into_iter().map(|item| item.provider_id).collect())
+        .unwrap_or_default();
+
+    let effective_base_url = effective_provider_id
+        .and_then(|id| db.get_provider_by_id(id, app_type).ok().flatten())
+        .zip(AppType::from_str(app_type).ok())
+        .and_then(|(provider, app)| {
+            crate::proxy::providers::get_adapter(&app)
+                .extract_base_url(&provider)
+                .ok()
+        });
+
+    Some(DecisionInputs {
+        mode: mode.to_string(),
+        selected_provider_id: crate::settings::get_effective_current_provider(
+            db,
+            &AppType::from_str(app_type).ok()?,
+        )
+        .ok()
+        .flatten()
+        .or_else(|| db.get_current_provider(app_type).ok().flatten()),
+        failover_queue,
+        prefers_selected: crate::settings::failover_prefers_selected(),
+        effective_base_url,
     })
 }
 
@@ -353,9 +450,39 @@ mod tests {
         Provider::with_id(id.to_string(), name.to_string(), json!({}), None)
     }
 
+    fn inputs(mode: &str) -> DecisionInputs {
+        DecisionInputs {
+            mode: mode.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// 记录一次决策，输入与 `mode` 一致（大多数用例只关心决策本身）。
+    fn record(
+        app_type: &str,
+        mode: &str,
+        provider: &Provider,
+        selection_ignored: bool,
+        upstream_base_url: Option<&str>,
+    ) {
+        record_selection(
+            app_type,
+            mode,
+            provider,
+            selection_ignored,
+            upstream_base_url.map(str::to_string),
+            inputs(mode),
+        );
+    }
+
+    /// 不做输入校验的读取（校验本身由专门的用例覆盖）。
+    fn view(app_type: &str) -> ActiveRoute {
+        snapshot(app_type, None).expect("a recorded route")
+    }
+
     #[test]
     fn unknown_app_has_no_active_route() {
-        assert!(snapshot("active-route-test-unknown").is_none());
+        assert!(snapshot("active-route-test-unknown", None).is_none());
     }
 
     #[test]
@@ -365,19 +492,19 @@ mod tests {
 
         record_error(app, crate::proxy::log_codes::fo::NO_PROVIDERS);
         assert_eq!(
-            snapshot(app).unwrap().last_error_code.as_deref(),
+            view(app).last_error_code.as_deref(),
             Some("FO-005")
         );
 
-        record_selection(
+        record(
             app,
             MODE_SELECTED,
             &provider,
             false,
-            Some("https://relay.example.com/v1".to_string()),
+            Some("https://relay.example.com/v1"),
         );
 
-        let route = snapshot(app).unwrap();
+        let route = view(app);
         assert_eq!(route.app_type, app);
         assert_eq!(route.mode, MODE_SELECTED);
         assert_eq!(route.effective_provider_id.as_deref(), Some("p1"));
@@ -391,7 +518,7 @@ mod tests {
         assert_eq!(route.last_error_code, None);
 
         clear(app);
-        assert!(snapshot(app).is_none());
+        assert!(snapshot(app, None).is_none());
     }
 
     #[test]
@@ -400,17 +527,17 @@ mod tests {
         let first = provider("p1", "First");
         let second = provider("p2", "Second");
 
-        record_selection(app, MODE_FAILOVER, &first, true, None);
-        let initial = snapshot(app).unwrap().last_switch_at;
+        record(app, MODE_FAILOVER, &first, true, None);
+        let initial = view(app).last_switch_at;
 
         // Same provider again: the timestamp must not move.
-        record_selection(app, MODE_FAILOVER, &first, true, None);
-        assert_eq!(snapshot(app).unwrap().last_switch_at, initial);
+        record(app, MODE_FAILOVER, &first, true, None);
+        assert_eq!(view(app).last_switch_at, initial);
 
         // Different provider: the timestamp is refreshed.
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        record_selection(app, MODE_FAILOVER, &second, true, None);
-        let after = snapshot(app).unwrap().last_switch_at;
+        record(app, MODE_FAILOVER, &second, true, None);
+        let after = view(app).last_switch_at;
         assert!(after > initial);
 
         clear(app);
@@ -421,10 +548,76 @@ mod tests {
         let app = "active-route-test-ignored";
         let winner = provider("queue-p1", "Queue P1");
 
-        record_selection(app, MODE_FAILOVER, &winner, true, None);
-        let route = snapshot(app).unwrap();
+        record(app, MODE_FAILOVER, &winner, true, None);
+        let route = view(app);
         assert_eq!(route.mode, MODE_FAILOVER);
         assert!(route.selection_ignored);
+
+        clear(app);
+    }
+
+    /// 用户真正关心的场景：应用开着但一直空闲，记录很旧，配置却一点没变。
+    /// 这时路由依然成立，不能因为「很久没有请求」就当成陈迹。
+    #[test]
+    fn an_idle_apps_old_record_still_counts_as_current() {
+        let app = "active-route-test-idle";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(PERSISTED_FILE_NAME);
+
+        let mut entry = recorded("queue-p1");
+        entry.last_confirmed_at = Some(1_790_000_000 - 6 * 3600);
+        write_sample(&path, app, entry);
+        assert_eq!(load_from_path(&path), 1);
+
+        let route = snapshot(app, Some(&inputs(MODE_FAILOVER))).expect("a record");
+        assert!(
+            !route.inputs_changed,
+            "an idle app must not turn a still-valid route into history"
+        );
+
+        clear(app);
+    }
+
+    /// 失效的判据是输入变了，而不是时间过去了。
+    #[test]
+    fn changed_inputs_mark_the_record_as_no_longer_current() {
+        let app = "active-route-test-inputs";
+        record(app, MODE_FAILOVER, &provider("queue-p1", "Queue P1"), true, None);
+
+        let matching = inputs(MODE_FAILOVER);
+        assert!(!snapshot(app, Some(&matching)).unwrap().inputs_changed);
+
+        let mut selected_changed = matching.clone();
+        selected_changed.selected_provider_id = Some("another-provider".to_string());
+        assert!(snapshot(app, Some(&selected_changed)).unwrap().inputs_changed);
+
+        let mut queue_changed = matching.clone();
+        queue_changed.failover_queue = vec!["p2".to_string()];
+        assert!(snapshot(app, Some(&queue_changed)).unwrap().inputs_changed);
+
+        // Takeover released: nothing is proxied any more, so the record is history.
+        assert!(snapshot(app, Some(&inputs(MODE_NATIVE)))
+            .unwrap()
+            .inputs_changed);
+
+        let mut url_changed = matching.clone();
+        url_changed.effective_base_url = Some("https://moved.example.com/v1".to_string());
+        assert!(snapshot(app, Some(&url_changed)).unwrap().inputs_changed);
+
+        let mut preferring = matching;
+        preferring.prefers_selected = !preferring.prefers_selected;
+        assert!(snapshot(app, Some(&preferring)).unwrap().inputs_changed);
+
+        clear(app);
+    }
+
+    /// 拿不到当前配置时不做校验（不能无端把每条记录都标成历史）。
+    #[test]
+    fn without_current_inputs_a_record_is_returned_unverified() {
+        let app = "active-route-test-unverified";
+        record(app, MODE_SELECTED, &provider("p1", "Provider One"), false, None);
+
+        assert!(!snapshot(app, None).unwrap().inputs_changed);
 
         clear(app);
     }
@@ -434,10 +627,10 @@ mod tests {
         let app = "active-route-test-error";
         let provider = provider("p1", "Provider One");
 
-        record_selection(app, MODE_SELECTED, &provider, false, None);
+        record(app, MODE_SELECTED, &provider, false, None);
         record_error(app, crate::proxy::log_codes::fo::ALL_CIRCUIT_OPEN);
 
-        let route = snapshot(app).unwrap();
+        let route = view(app);
         assert_eq!(route.effective_provider_id.as_deref(), Some("p1"));
         assert_eq!(route.last_error_code.as_deref(), Some("FO-004"));
 
@@ -453,6 +646,7 @@ mod tests {
             selection_ignored: true,
             last_switch_at: Some(1_790_000_000),
             last_confirmed_at: Some(1_790_000_010),
+            inputs: inputs(MODE_FAILOVER),
             last_error_code: None,
         }
     }
@@ -491,16 +685,16 @@ mod tests {
         let app = "active-route-test-confirmed-at";
         let provider = provider("p1", "Provider One");
 
-        record_selection(app, MODE_SELECTED, &provider, false, None);
-        let first = snapshot(app).unwrap();
+        record(app, MODE_SELECTED, &provider, false, None);
+        let first = view(app);
         assert_eq!(first.last_confirmed_at, first.last_switch_at);
 
         // Same provider: the switch time must stay put while the confirmation
         // time advances — this is why `lastConfirmedAt` cannot reuse
         // `lastSwitchAt`.
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        record_selection(app, MODE_SELECTED, &provider, false, None);
-        let second = snapshot(app).unwrap();
+        record(app, MODE_SELECTED, &provider, false, None);
+        let second = view(app);
         assert_eq!(second.last_switch_at, first.last_switch_at);
         assert!(second.last_confirmed_at > first.last_confirmed_at);
 
@@ -569,7 +763,7 @@ mod tests {
 
         assert_eq!(load_from_path(&path), 1);
 
-        let route = snapshot(app).expect("route restored from the previous run");
+        let route = view(app);
         assert_eq!(route.effective_provider_id.as_deref(), Some("queue-p1"));
         assert_eq!(route.mode, MODE_FAILOVER);
         assert!(route.selection_ignored);
@@ -585,11 +779,11 @@ mod tests {
         let path = dir.path().join(PERSISTED_FILE_NAME);
         write_sample(&path, app, recorded("stale-from-disk"));
 
-        record_selection(app, MODE_SELECTED, &provider("live", "Live"), false, None);
+        record(app, MODE_SELECTED, &provider("live", "Live"), false, None);
 
         assert_eq!(load_from_path(&path), 0);
         assert_eq!(
-            snapshot(app).unwrap().effective_provider_id.as_deref(),
+            view(app).effective_provider_id.as_deref(),
             Some("live")
         );
 
@@ -607,7 +801,7 @@ mod tests {
         )
         .expect("write stale cache");
         assert_eq!(load_from_path(&stale), 0);
-        assert!(snapshot("active-route-test-stale").is_none());
+        assert!(snapshot("active-route-test-stale", None).is_none());
 
         let corrupt = dir.path().join("corrupt.json");
         std::fs::write(&corrupt, b"not json at all").expect("write corrupt cache");
@@ -659,7 +853,7 @@ mod tests {
         assert!(!raw.contains("FO-005"), "the error code must not be written");
 
         assert_eq!(load_from_path(&path), 1);
-        assert_eq!(snapshot(app).unwrap().last_error_code, None);
+        assert_eq!(view(app).last_error_code, None);
 
         clear(app);
     }
@@ -685,24 +879,24 @@ mod tests {
         assert_eq!(path, dir.path().join(".cc-switch").join(PERSISTED_FILE_NAME));
 
         // A decision change writes itself out on the way past.
-        record_selection(
+        record(
             "codex",
             MODE_FAILOVER,
             &provider("queue-p1", "Queue P1"),
             true,
-            Some("http://127.0.0.1:4000/v1".to_string()),
+            Some("http://127.0.0.1:4000/v1"),
         );
         assert!(path.exists(), "a decision change must be persisted");
 
         // Repeating the same decision must not rewrite the cache.
         let first_write = std::fs::metadata(&path).expect("stat cache").modified().expect("mtime");
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        record_selection(
+        record(
             "codex",
             MODE_FAILOVER,
             &provider("queue-p1", "Queue P1"),
             true,
-            Some("http://127.0.0.1:4000/v1".to_string()),
+            Some("http://127.0.0.1:4000/v1"),
         );
         assert_eq!(
             std::fs::metadata(&path).expect("stat cache").modified().expect("mtime"),
@@ -721,7 +915,7 @@ mod tests {
         write_to_path(&path, &routes);
 
         assert_eq!(load_persisted(), 1);
-        let route = snapshot(app).expect("restored through the gated entry point");
+        let route = view(app);
         assert_eq!(route.effective_provider_id.as_deref(), Some("litellm"));
         assert_eq!(route.mode, MODE_FAILOVER);
 

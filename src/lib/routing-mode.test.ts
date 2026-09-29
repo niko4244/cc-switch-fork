@@ -3,11 +3,9 @@ import {
   describeRouteAge,
   deriveRoutingMode,
   isProxyRoutable,
-  isRouteStale,
   modeIgnoresSelection,
   planRoutingModeChange,
   ROUTE_FRESH_WITHIN_SECONDS,
-  ROUTE_STALE_AFTER_SECONDS,
   type RoutingMode,
 } from "./routing-mode";
 
@@ -122,17 +120,13 @@ describe("describeRouteAge", () => {
   });
 });
 
-describe("isRouteStale", () => {
+describe("describeRouteAge", () => {
   const now = 1_790_000_000;
 
-  it("trusts a recently confirmed route", () => {
-    expect(isRouteStale(now - 1, now)).toBe(false);
-    expect(isRouteStale(now - ROUTE_STALE_AFTER_SECONDS, now)).toBe(false);
-  });
-
-  it("stops treating a long-unconfirmed route as current", () => {
-    expect(isRouteStale(now - ROUTE_STALE_AFTER_SECONDS - 1, now)).toBe(true);
-    // The case that motivated this: a route restored from a previous run.
-    expect(isRouteStale(now - 6 * 3600, now)).toBe(true);
+  it("still reports an age for a long-idle route", () => {
+    // Age is information, not a verdict: the strip shows how long ago the route
+    // was last used and leaves staleness to the configuration check.
+    expect(describeRouteAge(now - 6 * 3600, now)).toBe("6h");
+    expect(describeRouteAge(now - 3 * 86400, now)).toBe("3d");
   });
 });

@@ -20,8 +20,10 @@
       "selectionIgnoredHint": "故障转移正按队列为该应用路由，你选中的供应商并未生效。",
       "confirmedJustNow": "刚刚确认",
       "confirmedAgo": "{{age}} 前确认",
-      "stale": "最后出现于 {{age}} 前",
-      "staleHint": "该应用近期没有路由记录，这条路可能已不再生效。"
+      "lastUsedAgo": "最后使用于 {{age}} 前",
+      "lastUsedJustNow": "刚刚用过",
+      "inputsChanged": "配置已变更",
+      "inputsChangedHint": "这条路由使用之后，路由配置发生过变化，它已不代表当前会走的路。"
     },
     "error": {
       "noProviders": "没有可路由的供应商（{{code}}）。请选择一个，或将其加入故障转移队列。",

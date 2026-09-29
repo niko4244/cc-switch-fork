@@ -20,8 +20,10 @@
       "selectionIgnoredHint": "フェイルオーバーがキューの順にルーティングするため、選択したプロバイダーは使用されません。",
       "confirmedJustNow": "たった今確認",
       "confirmedAgo": "{{age}}前に確認",
-      "stale": "最終確認は{{age}}前",
-      "staleHint": "このアプリは最近ルーティングされていないため、この経路は現在使われていない可能性があります。"
+      "lastUsedAgo": "最終使用は{{age}}前",
+      "lastUsedJustNow": "たった今使用",
+      "inputsChanged": "設定が変更されました",
+      "inputsChangedHint": "この経路の使用後にルーティング設定が変更されたため、現在の経路ではありません。"
     },
     "error": {
       "noProviders": "ルーティング先のプロバイダーがありません（{{code}}）。選択するか、フェイルオーバーキューに追加してください。",

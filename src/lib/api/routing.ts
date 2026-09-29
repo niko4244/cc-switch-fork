@@ -20,6 +20,14 @@ export interface ActiveRoute {
    * has an ancient switch time.
    */
   lastConfirmedAt: number | null;
+  /**
+   * Whether the routing configuration has changed since this record was made,
+   * i.e. whether the record can still be trusted to describe the route in use.
+   *
+   * This is the staleness signal, and it is not the age: an app that has simply
+   * been idle for hours has an old record that is still perfectly valid.
+   */
+  inputsChanged: boolean;
   /** FO-004 / FO-005 when the last routing attempt failed. */
   lastErrorCode: string | null;
 }

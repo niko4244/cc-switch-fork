@@ -68,11 +68,14 @@ impl ProviderRouter {
         // 非故障转移分支里就是唯一的候选。
         let selected_id = self.resolve_selected_provider_id(app_type);
 
+        // 决策输入：非故障转移分支也会用到（要原样记录它们才能事后判断失效）。
+        let prefers_selected = crate::settings::failover_prefers_selected();
+        let mut failover_queue: Vec<String> = Vec::new();
+
         if auto_failover_enabled {
             // 故障转移开启：先试当前选中的供应商，再按队列顺序依次尝试
             let all_providers = self.db.get_all_providers(app_type)?;
 
-            let prefers_selected = crate::settings::failover_prefers_selected();
             let mut ordered_ids: Vec<String> = Vec::new();
             let mut seen: HashSet<String> = HashSet::new();
 
@@ -86,9 +89,15 @@ impl ProviderRouter {
             }
 
             // 使用 DAO 返回的排序结果，确保和前端展示一致
-            for item in self.db.get_failover_queue(app_type)? {
-                if seen.insert(item.provider_id.clone()) {
-                    ordered_ids.push(item.provider_id);
+            failover_queue = self
+                .db
+                .get_failover_queue(app_type)?
+                .into_iter()
+                .map(|item| item.provider_id)
+                .collect();
+            for provider_id in &failover_queue {
+                if seen.insert(provider_id.clone()) {
+                    ordered_ids.push(provider_id.clone());
                 }
             }
 
@@ -139,19 +148,31 @@ impl ProviderRouter {
             log::info!("[{app_type}] 本次请求目标供应商: {} ({})", winner.id, winner.name);
             // 决策在此做出，就在这里记录下来：日志之外的调用方（`get_active_route`）
             // 才能回答“到底哪个上游会真正应答”。
-            self.record_active_route(app_type, winner, selected_id.as_deref(), auto_failover_enabled);
+            self.record_active_route(
+                app_type,
+                winner,
+                selected_id.as_deref(),
+                auto_failover_enabled,
+                &failover_queue,
+                prefers_selected,
+            );
         }
 
         Ok(result)
     }
 
     /// 把本次路由决策写入 `proxy::active_route` 注册表（§6.3）。
+    ///
+    /// 同时记录产生这条决策的输入（`DecisionInputs`）：它们后来变了就说明记录失效，
+    /// 界面只能把它当作历史，而不是当前会走的路。
     fn record_active_route(
         &self,
         app_type: &str,
         winner: &Provider,
         selected_id: Option<&str>,
         auto_failover_enabled: bool,
+        failover_queue: &[String],
+        prefers_selected: bool,
     ) {
         let mode = if !auto_failover_enabled {
             crate::proxy::active_route::MODE_SELECTED
@@ -176,7 +197,14 @@ impl ProviderRouter {
             mode,
             winner,
             selection_ignored,
-            upstream_base_url,
+            upstream_base_url.clone(),
+            crate::proxy::active_route::DecisionInputs {
+                mode: mode.to_string(),
+                selected_provider_id: selected_id.map(str::to_string),
+                failover_queue: failover_queue.to_vec(),
+                prefers_selected,
+                effective_base_url: upstream_base_url,
+            },
         );
     }
 

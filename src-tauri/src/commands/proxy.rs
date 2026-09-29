@@ -114,14 +114,18 @@ pub async fn update_global_proxy_config(
 
 /// 获取指定应用最近一次**实际生效**的路由。
 ///
-/// 数据来自路由器在做出决策时写入的内存注册表（`proxy::active_route`）。从未路由过
-/// 任何请求时返回 `None`，前端据此退回到「预测」展示而不是把猜测当成事实。
+/// 数据来自路由器在做出决策时写入的注册表（`proxy::active_route`，跨重启保留）。
+/// 从未路由过任何请求时返回 `None`，前端据此退回到「预测」展示而不是把猜测当成事实。
+///
+/// 返回前会用**当前**配置校验一次：输入变过的记录会带上 `inputsChanged`，让界面把它
+/// 当作历史而不是当前会走的路。这正是应用空闲（没有新请求）与真正失效的区别。
 /// 见 docs/DESIGN-routing-mode.md §6.3。
 #[tauri::command]
 pub async fn get_active_route(
+    state: tauri::State<'_, AppState>,
     app_type: String,
 ) -> Result<Option<crate::proxy::ActiveRoute>, String> {
-    Ok(crate::proxy::active_route::snapshot(&app_type))
+    Ok(crate::proxy::active_route::verified_snapshot(&state.db, &app_type).await)
 }
 
 /// 获取指定应用的代理配置

@@ -49,8 +49,10 @@ function route(overrides: Partial<ActiveRoute> = {}): ActiveRoute {
     upstreamBaseUrl: "http://127.0.0.1:4000/v1",
     selectionIgnored: false,
     lastSwitchAt: 1_700_000_000,
-    // Confirmed "now" unless a test says otherwise.
+    // Confirmed "now", with the configuration still matching, unless a test
+    // says otherwise.
     lastConfirmedAt: Math.floor(Date.now() / 1000),
+    inputsChanged: false,
     lastErrorCode: null,
     ...overrides,
   };
@@ -144,17 +146,43 @@ describe("RouteStatusStrip", () => {
     expect(await screen.findByText("confirmed just now")).toBeInTheDocument();
   });
 
-  it("demotes a long-unconfirmed route to history", async () => {
-    // The route restored from a previous run: its provider is known but nothing
-    // has confirmed it, so it must not read as the route currently in use.
+  it("keeps a long-idle route current when the config has not moved", async () => {
+    // The case that matters: the app has been open for hours without a single
+    // request, so the record is old — but nothing about the routing changed, so
+    // it is still exactly the route in use. Age must not libel it.
     getActiveRoute.mockResolvedValue(
-      route({ lastConfirmedAt: agoSeconds(6 * 3600) }),
+      route({ lastConfirmedAt: agoSeconds(6 * 3600), inputsChanged: false }),
     );
 
     renderStrip("failover");
 
-    expect(await screen.findByText("last seen 6h ago")).toBeInTheDocument();
+    expect(await screen.findByText("confirmed 6h ago")).toBeInTheDocument();
+    expect(screen.queryByText(/config changed/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/last used/)).not.toBeInTheDocument();
+  });
+
+  it("demotes a route whose configuration changed to history", async () => {
+    getActiveRoute.mockResolvedValue(
+      route({ lastConfirmedAt: agoSeconds(6 * 3600), inputsChanged: true }),
+    );
+
+    renderStrip("failover");
+
+    expect(await screen.findByText("config changed since")).toBeInTheDocument();
+    expect(screen.getByText("last used 6h ago")).toBeInTheDocument();
+    // "confirmed" next to "config changed since" would contradict itself.
     expect(screen.queryByText(/confirmed/)).not.toBeInTheDocument();
+  });
+
+  it("phrases a just-superseded route as used just now", async () => {
+    getActiveRoute.mockResolvedValue(
+      route({ lastConfirmedAt: agoSeconds(1), inputsChanged: true }),
+    );
+
+    renderStrip("failover");
+
+    expect(await screen.findByText("config changed since")).toBeInTheDocument();
+    expect(screen.getByText("last used just now")).toBeInTheDocument();
   });
 
   it("treats an undated record as unconfirmed rather than trusting it", async () => {

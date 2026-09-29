@@ -18,11 +18,7 @@ import { useTranslation } from "react-i18next";
 
 import { useProvidersQuery } from "@/lib/query/queries";
 import { useActiveRoute } from "@/lib/query/routing";
-import {
-  describeRouteAge,
-  isRouteStale,
-  type RoutingMode,
-} from "@/lib/routing-mode";
+import { describeRouteAge, type RoutingMode } from "@/lib/routing-mode";
 import { cn } from "@/lib/utils";
 import type { AppId } from "@/lib/api/types";
 
@@ -80,8 +76,33 @@ export function RouteStatusStrip({
   const confirmedAt = recorded?.lastConfirmedAt ?? null;
   const routeAge =
     confirmedAt === null ? null : describeRouteAge(confirmedAt, nowSeconds);
-  const routeIsStale =
-    confirmedAt !== null && isRouteStale(confirmedAt, nowSeconds);
+  // Staleness is decided by the backend comparing the current routing
+  // configuration against the one this record was made under — never by the
+  // clock, which would libel a route that is merely sitting idle.
+  const inputsChanged = recorded?.inputsChanged ?? false;
+
+  // Phrased as history when the config moved on and as a live confirmation when
+  // it did not: "confirmed" sitting next to "config changed since" would
+  // contradict itself.
+  const ageLabel = !recorded
+    ? null
+    : inputsChanged
+      ? routeAge
+        ? t("routing.status.lastUsedAgo", {
+            age: routeAge,
+            defaultValue: "last used {{age}} ago",
+          })
+        : t("routing.status.lastUsedJustNow", {
+            defaultValue: "last used just now",
+          })
+      : routeAge
+        ? t("routing.status.confirmedAgo", {
+            age: routeAge,
+            defaultValue: "confirmed {{age}} ago",
+          })
+        : t("routing.status.confirmedJustNow", {
+            defaultValue: "confirmed just now",
+          });
 
   const predictedProviderId = providersData?.currentProviderId ?? "";
   const predictedProvider = providersData?.providers[predictedProviderId];
@@ -137,33 +158,23 @@ export function RouteStatusStrip({
           {t("routing.status.predicted", { defaultValue: "predicted" })}
         </span>
       )}
-      {recorded && routeIsStale && (
-        // Stale reads as history, not as the current route, and it is toned like
-        // the other warnings so it cannot pass as a live answer.
+      {recorded && inputsChanged && (
+        // The configuration moved on, so this reads as history rather than as
+        // the route in use. Tone matches the other warnings.
         <span
           className="shrink-0 rounded bg-amber-500/15 px-1 text-amber-700 dark:text-amber-400"
-          title={t("routing.status.staleHint", {
+          title={t("routing.status.inputsChangedHint", {
             defaultValue:
-              "Nothing has been routed for this app recently, so this may no longer be the route in use.",
+              "The routing configuration changed after this route was used, so it is no longer what will answer.",
           })}
         >
-          {t("routing.status.stale", {
-            age: routeAge,
-            defaultValue: "last seen {{age}} ago",
+          {t("routing.status.inputsChanged", {
+            defaultValue: "config changed since",
           })}
         </span>
       )}
-      {recorded && !routeIsStale && (
-        <span className="shrink-0 text-muted-foreground">
-          {routeAge
-            ? t("routing.status.confirmedAgo", {
-                age: routeAge,
-                defaultValue: "confirmed {{age}} ago",
-              })
-            : t("routing.status.confirmedJustNow", {
-                defaultValue: "confirmed just now",
-              })}
-        </span>
+      {ageLabel && (
+        <span className="shrink-0 text-muted-foreground">{ageLabel}</span>
       )}
       {selectionIgnored && (
         <span
