@@ -143,6 +143,14 @@ vi.mock("@/components/ForkBuildBadge", () => ({
   ),
 }));
 
+// No test here exercises Settings itself; the stub only reports which tab App
+// asked it to open (the real page also needs a ThemeProvider this harness lacks).
+vi.mock("@/components/settings/SettingsPage", () => ({
+  SettingsPage: ({ defaultTab }: any) => (
+    <div data-testid="settings-page" data-default-tab={defaultTab} />
+  ),
+}));
+
 vi.mock("@/components/mcp/McpPanel", () => ({
   default: ({ open, onOpenChange }: any) =>
     open ? (
@@ -167,6 +175,9 @@ const renderApp = (AppComponent: ComponentType) => {
 
 describe("App integration with MSW", () => {
   beforeEach(() => {
+    // App persists the current view; a test that navigates (e.g. into
+    // Settings) must not leave the next one starting outside the providers view.
+    localStorage.clear();
     resetProviderState();
     toastSuccessMock.mockReset();
     toastErrorMock.mockReset();
@@ -235,7 +246,14 @@ describe("App integration with MSW", () => {
 
     // The main window, not just Settings → About: a stale or replaced binary
     // has to be visible without navigating anywhere.
-    expect(await screen.findByText("fork-build-badge")).toBeInTheDocument();
+    const badge = await screen.findByText("fork-build-badge");
+
+    // Clicking it lands on Settings → About, not just any settings tab.
+    fireEvent.click(badge);
+    expect(await screen.findByTestId("settings-page")).toHaveAttribute(
+      "data-default-tab",
+      "about",
+    );
   });
 
   it("shows toast when auto sync fails in background", async () => {

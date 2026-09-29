@@ -49,7 +49,9 @@ export function ForkBuildBadge({
 
   const state = describeForkUpdateState(info);
   const isPinned = state === "pinned";
-  const commit = info.commit ? info.commit.slice(0, 7) : info.bundleVersion;
+  // build.rs already shortens the hash; slicing here would drop a `-dirty`
+  // suffix, hiding exactly the uncommitted build this badge exists to expose.
+  const commit = info.commit || info.bundleVersion;
   const stateLabel =
     state === "official-pending-restart"
       ? t("fork.stateOfficialPending", {
