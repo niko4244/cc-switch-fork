@@ -1083,7 +1083,9 @@ impl ProxyService {
                         // The built-in official row is a routing capability, not
                         // a credential store. Its auth must remain empty even
                         // when the live Codex login uses OPENAI_API_KEY mode.
-                        if crate::proxy::providers::is_codex_official_provider(&provider) {
+                        // Seed-row check, not the category-only one: this is
+                        // credential bookkeeping (see the predicate's docs).
+                        if crate::proxy::providers::is_codex_official_seed_provider(&provider) {
                             return Ok(());
                         }
                         if let Some(token) = live_config
@@ -2364,7 +2366,7 @@ impl ProxyService {
                 Self::preserve_codex_auth_in_backup(
                     &mut effective_settings,
                     existing_value,
-                    crate::proxy::providers::is_codex_official_provider(provider),
+                    crate::proxy::providers::is_codex_official_seed_provider(provider),
                 )?;
             }
 
@@ -2730,7 +2732,7 @@ impl ProxyService {
         proxy_url: &str,
         provider: Option<&Provider>,
     ) -> Result<String, String> {
-        if provider.is_some_and(crate::proxy::providers::is_codex_official_provider) {
+        if provider.is_some_and(crate::proxy::providers::is_codex_official_seed_provider) {
             return crate::codex_config::apply_codex_official_proxy_route(toml_str, proxy_url)
                 .map_err(|e| format!("生成 Codex 官方接管配置失败: {e}"));
         }
@@ -2753,7 +2755,7 @@ impl ProxyService {
     }
 
     fn apply_codex_takeover_auth_placeholder(settings: &mut Value, provider: Option<&Provider>) {
-        if provider.is_some_and(crate::proxy::providers::is_codex_official_provider) {
+        if provider.is_some_and(crate::proxy::providers::is_codex_official_seed_provider) {
             return;
         }
 
@@ -2907,7 +2909,7 @@ impl ProxyService {
         provider: Option<&Provider>,
     ) -> Result<(), String> {
         let official_passthrough =
-            provider.is_some_and(crate::proxy::providers::is_codex_official_provider);
+            provider.is_some_and(crate::proxy::providers::is_codex_official_seed_provider);
         let placeholder_auth = config
             .get("auth")
             .is_some_and(Self::codex_auth_has_proxy_placeholder);

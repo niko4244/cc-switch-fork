@@ -46,9 +46,13 @@ use usage::validate_usage_script;
 /// The built-in Codex official provider is safe to select during takeover:
 /// Codex keeps ownership of its ChatGPT login and the proxy only forwards the
 /// authenticated request. Other official providers retain the existing block.
+///
+/// Uses the strict seed-row predicate: takeover writes the live config, so it
+/// needs the specific built-in row rather than a row that merely carries
+/// `category = "official"` (§6.2).
 pub fn official_provider_supports_proxy_takeover(app_type: &AppType, provider: &Provider) -> bool {
     matches!(app_type, AppType::Codex)
-        && crate::proxy::providers::is_codex_official_provider(provider)
+        && crate::proxy::providers::is_codex_official_seed_provider(provider)
 }
 
 /// 统一会话开关变更后，立即按新开关状态重写当前官方 Codex 供应商的

@@ -219,10 +219,32 @@ pub fn provider_needs_responses_namespace_flatten(provider: &Provider) -> bool {
     provider.is_xai_oauth()
 }
 
-/// The single built-in official Codex provider.  Unlike managed Codex OAuth
-/// providers used by Claude, this route receives authentication from the
-/// calling Codex client (`requires_openai_auth = true`).
+/// Whether a Codex provider is the official (ChatGPT login) route.
+///
+/// Detected by `category` alone. The built-in row is seeded with
+/// `id = CODEX_OFFICIAL_PROVIDER_ID` *and* `category = "official"`, but a user
+/// may rename the row, and an imported/deeplinked copy arrives under a
+/// different id while still being an official route — both must be recognised so
+/// the ChatGPT passthrough behaviour is not silently lost.
+///
+/// For takeover bookkeeping use [`is_codex_official_seed_provider`] instead.
 pub fn is_codex_official_provider(provider: &Provider) -> bool {
+    provider.category.as_deref() == Some("official")
+}
+
+/// Whether this is the **seeded** built-in official Codex row. Unlike
+/// [`is_codex_official_provider`] this keeps the id check, because takeover
+/// support genuinely requires the specific seed row.
+///
+/// Takeover writes credentials into the live config: for the built-in official
+/// route Codex supplies its own ChatGPT authorization (no placeholder is
+/// written), while every other provider gets the proxy bearer placeholder.
+/// Deciding that by `category` alone would drop the placeholder for a
+/// third-party row whose category is stale as `"official"` — leaving a live
+/// config that cannot authenticate. Routing, by contrast, must follow the
+/// category (§6.2) so a renamed or imported official copy still gets the
+/// ChatGPT passthrough.
+pub fn is_codex_official_seed_provider(provider: &Provider) -> bool {
     provider.id == crate::database::CODEX_OFFICIAL_PROVIDER_ID
         && provider.category.as_deref() == Some("official")
 }
@@ -871,9 +893,76 @@ context_window = 500000
     }
 
     #[test]
+    fn official_detection_is_by_category_only() {
+        // The seeded row: id + category.
+        let mut seeded = create_provider(json!({}));
+        seeded.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
+        seeded.category = Some("official".to_string());
+        assert!(is_codex_official_provider(&seeded));
+
+        // A renamed official row must still be recognised (§6.2): the user may
+        // rename the built-in provider, and the deeplink/import path can create
+        // an official copy under a different id.
+        let mut renamed = create_provider(json!({}));
+        renamed.id = "codex-official-2".to_string();
+        renamed.category = Some("official".to_string());
+        assert!(is_codex_official_provider(&renamed));
+
+        // The id alone is not enough: category is the single source of truth, so
+        // a row that merely reuses the seed id with another category is not the
+        // official route.
+        let mut mismatched = create_provider(json!({}));
+        mismatched.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
+        mismatched.category = Some("codex".to_string());
+        assert!(!is_codex_official_provider(&mismatched));
+
+        let mut no_category = create_provider(json!({}));
+        no_category.category = None;
+        assert!(!is_codex_official_provider(&no_category));
+
+        // The strict seed predicate keeps the id check for takeover bookkeeping.
+        assert!(is_codex_official_seed_provider(&seeded));
+        assert!(!is_codex_official_seed_provider(&renamed));
+    }
+
+    #[test]
+    fn misclassified_third_party_row_is_not_the_official_seed() {
+        // A third-party provider whose category went stale as "official": routing
+        // follows the category (§6.2), but takeover credential handling must not,
+        // or its proxy bearer placeholder would be dropped from the live config.
+        let mut misclassified = create_provider(json!({}));
+        misclassified.id = "deepseek".to_string();
+        misclassified.category = Some("official".to_string());
+
+        assert!(is_codex_official_provider(&misclassified));
+        assert!(!is_codex_official_seed_provider(&misclassified));
+    }
+
+    #[test]
+    fn renamed_official_provider_gets_official_catalog_profile_and_base_url() {
+        let mut provider = create_provider(json!({ "auth": {}, "config": "" }));
+        provider.id = "codex-official-imported".to_string();
+        provider.category = Some("official".to_string());
+        let adapter = CodexAdapter::new();
+
+        assert!(is_codex_official_provider(&provider));
+        assert!(matches!(
+            resolve_codex_catalog_tool_profile(&provider),
+            crate::codex_config::CodexCatalogToolProfile::NativeResponses
+        ));
+        assert_eq!(
+            adapter
+                .extract_base_url(&provider)
+                .expect("official base url"),
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert!(adapter.extract_auth(&provider).is_none());
+    }
+
+    #[test]
     fn official_provider_uses_fixed_chatgpt_backend_without_stored_key() {
         let mut provider = create_provider(json!({ "auth": {}, "config": "" }));
-        provider.id = "codex-official".to_string();
+        provider.id = crate::database::CODEX_OFFICIAL_PROVIDER_ID.to_string();
         provider.category = Some("official".to_string());
         let adapter = CodexAdapter::new();
 
