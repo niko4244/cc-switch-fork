@@ -1,17 +1,29 @@
 {
-"routing": {
-  "label": "路由",
-  "groupLabel": "{{app}} 路由模式",
-  "native": "原生",
-  "selected": "指定供应商",
-  "failover": "故障转移",
-  "changeFailed": "无法更改 {{app}} 的路由",
-  "description": {
-    "native": "{{app}} 使用自身的登录凭据，cc-switch 不会修改其配置。",
-    "selected": "将 {{app}} 的请求经由 cc-switch 发送给你选中的供应商。",
-    "failover": "将 {{app}} 的请求按故障转移队列发送，优先级最高者先用。"
-  }
-},
+  "routing": {
+    "label": "路由",
+    "groupLabel": "{{app}} 路由模式",
+    "native": "原生",
+    "selected": "指定供应商",
+    "failover": "故障转移",
+    "changeFailed": "无法更改 {{app}} 的路由",
+    "description": {
+      "native": "{{app}} 使用自身的登录凭据，cc-switch 不会修改其配置。",
+      "selected": "将 {{app}} 的请求经由 cc-switch 发送给你选中的供应商。",
+      "failover": "将 {{app}} 的请求按故障转移队列发送，优先级最高者先用。"
+    },
+    "status": {
+      "nativeHint": "使用自身上游",
+      "predicted": "预测",
+      "noProvider": "未选择供应商",
+      "unknownProvider": "未知供应商",
+      "selectionIgnored": "选择已被忽略",
+      "selectionIgnoredHint": "故障转移正按队列为该应用路由，你选中的供应商并未生效。"
+    },
+    "error": {
+      "noProviders": "没有可路由的供应商（{{code}}）。请选择一个，或将其加入故障转移队列。",
+      "allCircuitsOpen": "所有候选供应商都已熔断（{{code}}）。"
+    }
+  },
   "app": {
     "title": "CC Switch",
     "description": "Claude Code / Codex / Gemini CLI 全方位辅助工具"

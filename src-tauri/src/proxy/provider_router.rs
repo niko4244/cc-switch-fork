@@ -64,6 +64,10 @@ impl ProviderRouter {
             }
         };
 
+        // 选中项：故障转移分支里用于判断“队列是否覆盖了用户的选择”，
+        // 非故障转移分支里就是唯一的候选。
+        let selected_id = self.resolve_selected_provider_id(app_type);
+
         if auto_failover_enabled {
             // 故障转移开启：先试当前选中的供应商，再按队列顺序依次尝试
             let all_providers = self.db.get_all_providers(app_type)?;
@@ -74,7 +78,7 @@ impl ProviderRouter {
 
             // 选中的供应商排在最前：选择是用户的明确意图，队列只是兵底
             if prefers_selected {
-                if let Some(selected_id) = self.resolve_selected_provider_id(app_type) {
+                if let Some(selected_id) = selected_id.clone() {
                     log::info!("[{app_type}] 故障转移：优先使用选中的供应商 {selected_id}");
                     seen.insert(selected_id.clone());
                     ordered_ids.push(selected_id);
@@ -106,9 +110,7 @@ impl ProviderRouter {
             }
         } else {
             // 故障转移关闭：仅使用当前供应商，跳过熔断器检查
-            let current_id = self.resolve_selected_provider_id(app_type);
-
-            if let Some(current_id) = current_id {
+            if let Some(current_id) = selected_id.clone() {
                 if let Some(current) = self.db.get_provider_by_id(&current_id, app_type)? {
                     total_providers = 1;
                     result.push(current);
@@ -117,20 +119,65 @@ impl ProviderRouter {
         }
 
         if result.is_empty() {
-            if total_providers > 0 && circuit_open_count == total_providers {
+            let code = if total_providers > 0 && circuit_open_count == total_providers {
                 log::warn!("[{app_type}] [FO-004] 所有供应商均已熔断");
-                return Err(AppError::AllProvidersCircuitOpen);
+                crate::proxy::log_codes::fo::ALL_CIRCUIT_OPEN
             } else {
                 log::warn!("[{app_type}] [FO-005] 未配置供应商");
-                return Err(AppError::NoProvidersConfigured);
-            }
+                crate::proxy::log_codes::fo::NO_PROVIDERS
+            };
+            crate::proxy::active_route::record_error(app_type, code);
+
+            return Err(if code == crate::proxy::log_codes::fo::ALL_CIRCUIT_OPEN {
+                AppError::AllProvidersCircuitOpen
+            } else {
+                AppError::NoProvidersConfigured
+            });
         }
 
         if let Some(winner) = result.first() {
             log::info!("[{app_type}] 本次请求目标供应商: {} ({})", winner.id, winner.name);
+            // 决策在此做出，就在这里记录下来：日志之外的调用方（`get_active_route`）
+            // 才能回答“到底哪个上游会真正应答”。
+            self.record_active_route(app_type, winner, selected_id.as_deref(), auto_failover_enabled);
         }
 
         Ok(result)
+    }
+
+    /// 把本次路由决策写入 `proxy::active_route` 注册表（§6.3）。
+    fn record_active_route(
+        &self,
+        app_type: &str,
+        winner: &Provider,
+        selected_id: Option<&str>,
+        auto_failover_enabled: bool,
+    ) {
+        let mode = if !auto_failover_enabled {
+            crate::proxy::active_route::MODE_SELECTED
+        } else {
+            crate::proxy::active_route::MODE_FAILOVER
+        };
+
+        // 故障转移选中的不是用户选中的那一个 => 界面必须提示“选择已被忽略”。
+        let selection_ignored = auto_failover_enabled
+            && selected_id.is_some_and(|selected| selected != winner.id.as_str());
+
+        let upstream_base_url = AppType::from_str(app_type)
+            .ok()
+            .and_then(|app| {
+                crate::proxy::providers::get_adapter(&app)
+                    .extract_base_url(winner)
+                    .ok()
+            });
+
+        crate::proxy::active_route::record_selection(
+            app_type,
+            mode,
+            winner,
+            selection_ignored,
+            upstream_base_url,
+        );
     }
 
     /// 请求执行前获取熔断器“放行许可”

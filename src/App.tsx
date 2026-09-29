@@ -42,6 +42,8 @@ import { openclawKeys, useOpenClawHealth } from "@/hooks/useOpenClaw";
 import { hermesKeys, useOpenHermesWebUI } from "@/hooks/useHermes";
 import { hermesApi } from "@/lib/api/hermes";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
+import { useAutoFailoverEnabled } from "@/lib/query/failover";
+import { deriveRoutingMode } from "@/lib/routing-mode";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
 import { useTauriEvent } from "@/hooks/useTauriEvent";
 import { useLastValidValue } from "@/hooks/useLastValidValue";
@@ -67,6 +69,7 @@ import { UpdateBadge } from "@/components/UpdateBadge";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
 import { RoutingModeControl } from "@/components/proxy/RoutingModeControl";
+import { RouteStatusStrip } from "@/components/proxy/RouteStatusStrip";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
 import PromptPanel from "@/components/prompts/PromptPanel";
@@ -264,6 +267,14 @@ function App() {
     status: proxyStatus,
   } = useProxyStatus();
   const isCurrentAppTakeoverActive = takeoverStatus?.[activeApp] || false;
+  // The status strip mirrors the control's own mode derivation so the two can
+  // never disagree on screen.
+  const { data: headerFailoverEnabled = false } =
+    useAutoFailoverEnabled(activeApp);
+  const headerRoutingMode = deriveRoutingMode(
+    isCurrentAppTakeoverActive,
+    headerFailoverEnabled,
+  );
   const activeProviderId = useMemo(() => {
     const target = proxyStatus?.active_targets?.find(
       (t) => t.app_type === activeApp,
@@ -1260,7 +1271,15 @@ function App() {
                     <ClaudeDesktopRouteToggle />
                   ) : (
                     settingsData?.enableLocalProxy && (
-                      <RoutingModeControl activeApp={activeApp} />
+                      <div className="flex flex-col items-end gap-0.5">
+                        <RoutingModeControl activeApp={activeApp} />
+                        {/* Which upstream will actually answer? The control
+                            above states the intent; this states the outcome. */}
+                        <RouteStatusStrip
+                          activeApp={activeApp}
+                          mode={headerRoutingMode}
+                        />
+                      </div>
                     )
                   )}
                 </div>

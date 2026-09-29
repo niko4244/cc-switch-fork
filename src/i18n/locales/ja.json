@@ -1,17 +1,29 @@
 {
-"routing": {
-  "label": "ルーティング",
-  "groupLabel": "{{app}} のルーティングモード",
-  "native": "ネイティブ",
-  "selected": "選択したプロバイダー",
-  "failover": "フェイルオーバー",
-  "changeFailed": "{{app}} のルーティングを変更できませんでした",
-  "description": {
-    "native": "{{app}} は自身のサインインを使用し、cc-switch は設定を変更しません。",
-    "selected": "{{app}} のリクエストを選択したプロバイダーへ cc-switch 経由で送信します。",
-    "failover": "{{app}} のリクエストをフェイルオーバーキュー（優先度順）に送信します。"
-  }
-},
+  "routing": {
+    "label": "ルーティング",
+    "groupLabel": "{{app}} のルーティングモード",
+    "native": "ネイティブ",
+    "selected": "選択したプロバイダー",
+    "failover": "フェイルオーバー",
+    "changeFailed": "{{app}} のルーティングを変更できませんでした",
+    "description": {
+      "native": "{{app}} は自身のサインインを使用し、cc-switch は設定を変更しません。",
+      "selected": "{{app}} のリクエストを選択したプロバイダーへ cc-switch 経由で送信します。",
+      "failover": "{{app}} のリクエストをフェイルオーバーキュー（優先度順）に送信します。"
+    },
+    "status": {
+      "nativeHint": "自身の上流を使用",
+      "predicted": "予測",
+      "noProvider": "プロバイダー未選択",
+      "unknownProvider": "不明なプロバイダー",
+      "selectionIgnored": "選択は無視されます",
+      "selectionIgnoredHint": "フェイルオーバーがキューの順にルーティングするため、選択したプロバイダーは使用されません。"
+    },
+    "error": {
+      "noProviders": "ルーティング先のプロバイダーがありません（{{code}}）。選択するか、フェイルオーバーキューに追加してください。",
+      "allCircuitsOpen": "候補のプロバイダーがすべてサーキットブレーク中です（{{code}}）。"
+    }
+  },
   "app": {
     "title": "CC Switch",
     "description": "Claude Code・Codex・Gemini CLI のためのオールインワンアシスタント"

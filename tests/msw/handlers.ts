@@ -348,7 +348,12 @@ export const handlers = [
   // RoutingModeControl always mounts in the provider header, so the failover flag
   // is now read on every app view rather than only when the (default-off)
   // failover switch was enabled.
-  http.post(`${TAURI_ENDPOINT}/get_auto_failover_enabled`, () => success(false)),
+  http.post(`${TAURI_ENDPOINT}/get_auto_failover_enabled`, () =>
+    success(false),
+  ),
+  // `null` = the proxy has not routed anything for this app yet, which is the
+  // state every test starts in; RouteStatusStrip then shows a predicted route.
+  http.post(`${TAURI_ENDPOINT}/get_active_route`, () => success(null)),
   http.post(`${TAURI_ENDPOINT}/set_auto_failover_enabled`, () => success(true)),
   http.post(`${TAURI_ENDPOINT}/get_failover_queue`, () => success([])),
   http.post(`${TAURI_ENDPOINT}/get_available_providers_for_failover`, () =>

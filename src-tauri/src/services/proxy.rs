@@ -893,6 +893,11 @@ impl ProxyService {
             .await
             .map_err(|e| format!("清除 {app_type_str} 健康状态失败: {e}"))?;
 
+        // 4b) 丢弃该应用最近一次的路由记录（§6.3）。接管已撤销，旧的
+        // 「实际路由」不再代表任何东西；不清理的话再次开启接管后，界面会把
+        // 上一次接管的旧结果当作当前事实展示。
+        crate::proxy::active_route::clear(app_type_str);
+
         // 5) 若无其它接管，更新旧标志，并停止代理服务
         // 检查是否还有其它 app 的 enabled = true
         let any_enabled = self

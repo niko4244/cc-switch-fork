@@ -2,6 +2,7 @@
 //!
 //! 提供本地HTTP代理服务，支持多Provider故障转移和请求透传
 
+pub mod active_route;
 pub mod body_filter;
 pub mod cache_injector;
 pub mod circuit_breaker;
@@ -42,6 +43,8 @@ pub use circuit_breaker::{
 };
 #[allow(unused_imports)]
 pub use error::ProxyError;
+#[allow(unused_imports)]
+pub use active_route::ActiveRoute;
 #[allow(unused_imports)]
 pub use provider_router::ProviderRouter;
 #[allow(unused_imports)]

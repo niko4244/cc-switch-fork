@@ -1,17 +1,29 @@
 {
-"routing": {
-  "label": "路由",
-  "groupLabel": "{{app}} 路由模式",
-  "native": "原生",
-  "selected": "指定供應商",
-  "failover": "故障轉移",
-  "changeFailed": "無法變更 {{app}} 的路由",
-  "description": {
-    "native": "{{app}} 使用自身的登入憑證，cc-switch 不會修改其設定。",
-    "selected": "將 {{app}} 的請求透過 cc-switch 傳送給你選取的供應商。",
-    "failover": "將 {{app}} 的請求依故障轉移佇列傳送，優先級最高者先用。"
-  }
-},
+  "routing": {
+    "label": "路由",
+    "groupLabel": "{{app}} 路由模式",
+    "native": "原生",
+    "selected": "指定供應商",
+    "failover": "故障轉移",
+    "changeFailed": "無法變更 {{app}} 的路由",
+    "description": {
+      "native": "{{app}} 使用自身的登入憑證，cc-switch 不會修改其設定。",
+      "selected": "將 {{app}} 的請求透過 cc-switch 傳送給你選取的供應商。",
+      "failover": "將 {{app}} 的請求依故障轉移佇列傳送，優先級最高者先用。"
+    },
+    "status": {
+      "nativeHint": "使用自身上游",
+      "predicted": "預測",
+      "noProvider": "未選擇供應商",
+      "unknownProvider": "未知供應商",
+      "selectionIgnored": "選擇已被忽略",
+      "selectionIgnoredHint": "故障轉移正依佇列為此應用程式路由，你選取的供應商並未生效。"
+    },
+    "error": {
+      "noProviders": "沒有可路由的供應商（{{code}}）。請選擇一個，或將其加入故障轉移佇列。",
+      "allCircuitsOpen": "所有候選供應商都已熔斷（{{code}}）。"
+    }
+  },
   "app": {
     "title": "CC Switch",
     "description": "Claude Code / Codex / Gemini CLI 全方位輔助工具"

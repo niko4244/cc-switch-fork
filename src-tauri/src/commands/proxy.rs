@@ -112,6 +112,18 @@ pub async fn update_global_proxy_config(
         .map_err(|e| e.to_string())
 }
 
+/// 获取指定应用最近一次**实际生效**的路由。
+///
+/// 数据来自路由器在做出决策时写入的内存注册表（`proxy::active_route`）。从未路由过
+/// 任何请求时返回 `None`，前端据此退回到「预测」展示而不是把猜测当成事实。
+/// 见 docs/DESIGN-routing-mode.md §6.3。
+#[tauri::command]
+pub async fn get_active_route(
+    app_type: String,
+) -> Result<Option<crate::proxy::ActiveRoute>, String> {
+    Ok(crate::proxy::active_route::snapshot(&app_type))
+}
+
 /// 获取指定应用的代理配置
 ///
 /// 返回应用级配置（enabled、auto_failover、超时、熔断器等）
