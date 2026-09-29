@@ -3004,6 +3004,24 @@ impl ProxyService {
             .transpose()
             .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
 
+        // 覆盖率保护：绝不把比 live 更旧的 ChatGPT 登录写回去。
+        //
+        // 更旧的 refresh token 很可能已经被轮换过，重放它会被 OpenAI 判为重放并
+        // 吊销整个 token family，把用户踢成 `401 token_expired`
+        // （桌面端显示 `workspace routing discovery unauthorized (401)`）。
+        // 触发场景：异常退出后从 Live 备份恢复，备份里的 `auth.json` 比 live 旧。
+        // 丢弃旧登录后走下面的 `(None, Some(cfg))` 分支，只写回 `config.toml`。
+        let live_auth = crate::codex_config::read_codex_live_auth_json();
+        let auth = auth.filter(|incoming| {
+            let stale = crate::codex_config::codex_auth_is_stale_login(incoming, &live_auth);
+            if stale {
+                log::warn!(
+                    "Codex Live 备份里的 ChatGPT 登录比当前 auth.json 更旧，保留 Live 登录，仅写回 config.toml"
+                );
+            }
+            !stale
+        });
+
         match (auth, prepared_cfg.as_deref()) {
             (Some(auth), Some(cfg)) => {
                 if auth.as_object().is_some_and(|obj| obj.is_empty()) {
@@ -3827,6 +3845,55 @@ mod tests {
             .stop_with_restore()
             .await
             .expect("stop proxy and restore live config");
+    }
+
+    /// 回归（2026-09-29 事故）：异常退出后从 Live 备份恢复时，如果备份里的
+    /// ChatGPT 登录比当前 `auth.json` 更旧，必须保留 live 登录、只写回
+    /// `config.toml`。旧 refresh token 的重放会被 OpenAI 判为已使用并吊销整个
+    /// token family，桌面端表现为 `workspace routing discovery unauthorized (401)`。
+    #[test]
+    #[serial]
+    fn codex_live_restore_keeps_a_newer_login_over_a_stale_backup() {
+        let _home = TempHome::new();
+
+        let fresh_login = json!({
+            "auth_mode": "chatgpt",
+            "last_refresh": "2026-09-28T15:37:19.801012100Z",
+            "tokens": { "access_token": "fresh-access", "refresh_token": "rt.fresh" }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &fresh_login,
+            Some("model_provider = \"openai\"\nmodel = \"gpt-5-codex\"\n"),
+        )
+        .expect("seed fresh live login");
+
+        let service = ProxyService::new(Arc::new(Database::memory().expect("init db")));
+        let stale_backup = json!({
+            "auth": {
+                "auth_mode": "chatgpt",
+                "last_refresh": "2026-09-14T00:52:04.821012700Z",
+                "tokens": { "access_token": "stale-access", "refresh_token": "rt.stale" }
+            },
+            "config": "model_provider = \"openai\"\nmodel = \"gpt-5-restored\"\n"
+        });
+        service
+            .write_codex_live(&stale_backup)
+            .expect("restore stale live backup");
+
+        let live_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read live auth");
+        assert_eq!(
+            live_auth, fresh_login,
+            "a stale backup must never overwrite the newer ChatGPT login"
+        );
+
+        let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read live config");
+        assert!(
+            live_config.contains("gpt-5-restored"),
+            "config.toml must still be restored while auth.json is protected"
+        );
     }
 
     #[test]

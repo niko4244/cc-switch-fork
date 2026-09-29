@@ -1677,6 +1677,69 @@ pub fn read_codex_live_settings() -> Result<Value, AppError> {
     Ok(json!({ "auth": auth, "config": cfg_text }))
 }
 
+/// 读取 live `auth.json`；缺失或不可解析时返回 `{}`。
+///
+/// 与 [`read_codex_live_settings`] 保持一致的「缺文件即无登录」语义，
+/// 供写入前的登录覆盖率保护使用。
+pub fn read_codex_live_auth_json() -> Value {
+    let auth_path = get_codex_auth_path();
+    if !auth_path.exists() {
+        return json!({});
+    }
+    read_json_file(&auth_path).unwrap_or_else(|_| json!({}))
+}
+
+/// ChatGPT 登录的 refresh token；非 ChatGPT 登录（API key 供应商、代理占位符、
+/// 空快照）时为 `None`。
+fn chatgpt_login_refresh_token(auth: &Value) -> Option<&str> {
+    auth.get("tokens")
+        .and_then(|tokens| tokens.get("refresh_token"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+/// 登录的 `last_refresh` 时间戳；缺失或无法解析时为 `None`。
+fn login_last_refresh(auth: &Value) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    auth.get("last_refresh")
+        .and_then(Value::as_str)
+        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw.trim()).ok())
+}
+
+/// 判定 `incoming` 是不是比 `live` 更旧的 ChatGPT 登录。
+///
+/// 只在两边都带 ChatGPT 登录（`tokens.refresh_token`）且 login 不同时才比较
+/// `last_refresh`。
+///
+/// 更旧的登录一旦写回 live，就会把已经被轮换过的 refresh token 再喂给服务端，
+/// 触发 OpenAI 的重放检测并吊销整个 token family —— 表现为 Codex auth manager 的
+/// `Failed to refresh token: ... your refresh token was already used`、HTTP 401
+/// `token_expired`，桌面端则显示 `workspace routing discovery unauthorized (401)`。
+/// 因此这种情况必须保留 live 登录，只写 `config.toml`。
+///
+/// 时间戳缺失时保守放行（返回 `false`），避免把合法写入误判成陈旧。
+pub fn codex_auth_is_stale_login(incoming: &Value, live: &Value) -> bool {
+    let (Some(incoming_refresh), Some(live_refresh)) = (
+        chatgpt_login_refresh_token(incoming),
+        chatgpt_login_refresh_token(live),
+    ) else {
+        return false;
+    };
+
+    if incoming_refresh == live_refresh {
+        // 同一个登录，重复写回不会引入重放风险。
+        return false;
+    }
+
+    let (Some(incoming_at), Some(live_at)) =
+        (login_last_refresh(incoming), login_last_refresh(live))
+    else {
+        return false;
+    };
+
+    incoming_at < live_at
+}
+
 /// `[model_providers.custom]` entry that makes an official (ChatGPT OAuth)
 /// provider behave like Codex's built-in `openai` entry while running under
 /// the shared custom id: `requires_openai_auth` routes auth to the ChatGPT
@@ -4509,5 +4572,72 @@ model_catalog_json = "cc-switch-model-catalog.json"
             parsed.get("model_catalog_json").is_none(),
             "None arm should remove relative cc-switch-owned field"
         );
+    }
+
+    fn chatgpt_login(last_refresh: &str, refresh_token: &str) -> Value {
+        json!({
+            "auth_mode": "chatgpt",
+            "last_refresh": last_refresh,
+            "tokens": {
+                "access_token": format!("access-{refresh_token}"),
+                "refresh_token": refresh_token,
+                "account_id": "acct-1",
+            }
+        })
+    }
+
+    /// 2026-09-29 的实际事故：cc-switch 把 09-14 的登录快照恢复回 live，
+    /// 覆盖了 09-28 的新登录，重放的 refresh token 被 OpenAI 判为已使用。
+    #[test]
+    fn stale_login_detection_rejects_a_backup_older_than_live() {
+        let live = chatgpt_login("2026-09-28T15:37:19.801012100Z", "rt.live");
+        let stale = chatgpt_login("2026-09-14T00:52:04.821012700Z", "rt.stale");
+
+        assert!(codex_auth_is_stale_login(&stale, &live));
+        assert!(
+            !codex_auth_is_stale_login(&live, &stale),
+            "a newer backup may still replace an older live login"
+        );
+    }
+
+    #[test]
+    fn stale_login_detection_ignores_identical_or_non_chatgpt_logins() {
+        let live = chatgpt_login("2026-09-28T15:37:19.801012100Z", "rt.same");
+
+        assert!(
+            !codex_auth_is_stale_login(&live, &live),
+            "rewriting the same login cannot replay a rotated token"
+        );
+
+        // API key provider snapshot / proxy placeholder / empty auth carry no
+        // ChatGPT login, so the freshness comparison does not apply.
+        let api_key = json!({ "OPENAI_API_KEY": "sk-test" });
+        assert!(!codex_auth_is_stale_login(&api_key, &live));
+        assert!(!codex_auth_is_stale_login(&live, &api_key));
+        assert!(!codex_auth_is_stale_login(&json!({}), &live));
+    }
+
+    #[test]
+    fn stale_login_detection_needs_comparable_timestamps() {
+        let live = chatgpt_login("2026-09-28T15:37:19.801012100Z", "rt.live");
+        let undated = json!({
+            "auth_mode": "chatgpt",
+            "tokens": { "refresh_token": "rt.old" }
+        });
+
+        assert!(!codex_auth_is_stale_login(&undated, &live));
+        assert!(!codex_auth_is_stale_login(&live, &undated));
+    }
+
+    #[test]
+    fn stale_login_detection_ignores_blank_refresh_tokens() {
+        let live = chatgpt_login("2026-09-28T15:37:19.801012100Z", "rt.live");
+        let blank = json!({
+            "auth_mode": "chatgpt",
+            "last_refresh": "2026-09-14T00:52:04.821012700Z",
+            "tokens": { "refresh_token": "   " }
+        });
+
+        assert!(!codex_auth_is_stale_login(&blank, &live));
     }
 }
