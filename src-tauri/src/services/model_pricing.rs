@@ -476,19 +476,38 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    /// Redirect every home-derived path into a temp dir.
+    ///
+    /// `CC_SWITCH_TEST_HOME` alone is not enough on Windows: `get_app_config_dir()`
+    /// has a v3.10.3 legacy fallback that reads the plain `HOME` variable, which in
+    /// a test process still points at the real user profile — the suite then wrote
+    /// to the real `~/.cc-switch/model-pricing.json`. Set `HOME`/`USERPROFILE` as
+    /// well so no code path can escape the temp dir, and assert it below.
     fn with_test_home(test: impl FnOnce(&Database, &PathBuf)) {
         let temp = tempfile::tempdir().expect("tempdir");
-        let previous = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let previous_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
+        let previous_home = std::env::var_os("HOME");
+        let previous_userprofile = std::env::var_os("USERPROFILE");
         std::env::set_var("CC_SWITCH_TEST_HOME", temp.path());
+        std::env::set_var("HOME", temp.path());
+        std::env::set_var("USERPROFILE", temp.path());
 
         let db = Database::memory().expect("memory database");
         let path = model_pricing_file_path();
+        assert!(
+            path.starts_with(temp.path()),
+            "model-pricing tests must stay inside the temp home, got {}",
+            path.display()
+        );
         test(&db, &path);
 
-        match previous {
-            Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
-            None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
-        }
+        let restore = |key: &str, value: Option<std::ffi::OsString>| match value {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        };
+        restore("CC_SWITCH_TEST_HOME", previous_test_home);
+        restore("HOME", previous_home);
+        restore("USERPROFILE", previous_userprofile);
     }
 
     fn sample_pricing() -> ModelPricingInfo {

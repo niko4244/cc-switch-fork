@@ -33,6 +33,44 @@ pub fn get_home_dir() -> PathBuf {
     })
 }
 
+/// `CC_SWITCH_TEST_HOME` 的值是否构成一次有效的 home 覆盖（空串不算）。
+fn is_valid_test_home(value: Option<&str>) -> bool {
+    value
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// 是否处于显式测试 home 覆盖（`CC_SWITCH_TEST_HOME`）。
+///
+/// 该变量是测试/调试专用开关。一旦生效，任何“回退到真实用户目录”的兼容逻辑
+/// 都必须停用：测试进程里的 `HOME`/`USERPROFILE` 往往仍指向真实用户目录，回退会
+/// 让测试读写真实 `~/.cc-switch`。
+pub fn has_test_home_override() -> bool {
+    is_valid_test_home(std::env::var("CC_SWITCH_TEST_HOME").ok().as_deref())
+}
+
+/// v3.10.3 兼容回退：`HOME` 下存在旧数据库时改用它。
+///
+/// `test_home_active` 为 true 时永不做回退（见 `has_test_home_override`）。
+#[cfg(windows)]
+fn legacy_home_fallback_dir(home_env: Option<&str>, test_home_active: bool) -> Option<PathBuf> {
+    if test_home_active {
+        return None;
+    }
+
+    let trimmed = home_env?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let legacy_dir = PathBuf::from(trimmed).join(".cc-switch");
+    if legacy_dir.join("cc-switch.db").exists() {
+        Some(legacy_dir)
+    } else {
+        None
+    }
+}
+
 /// 获取 Claude Code 配置目录路径
 pub fn get_claude_config_dir() -> PathBuf {
     if let Some(custom) = crate::settings::get_claude_override_dir() {
@@ -191,23 +229,24 @@ pub fn get_app_config_dir() -> PathBuf {
     // v3.10.3 可能在 `HOME/.cc-switch/` 下创建/使用了数据库。
     // 这里仅在“默认位置没有数据库”时回退到旧位置，避免再次出现“供应商消失”问题，
     // 同时也避免新安装因为 `HOME` 被设置而写入非预期路径。
+    //
+    // 例外：`CC_SWITCH_TEST_HOME` 显式覆盖 home dir 时绝不做这个回退。测试进程的
+    // `HOME` 通常仍指向真实用户目录，回退会让测试（例如 model-pricing 的用例）直接
+    // 写入真实 `~/.cc-switch`，污染用户数据。
     #[cfg(windows)]
     {
         let default_db = default_dir.join("cc-switch.db");
         if !default_db.exists() {
-            if let Ok(home_env) = std::env::var("HOME") {
-                let trimmed = home_env.trim();
-                if !trimmed.is_empty() {
-                    let legacy_dir = PathBuf::from(trimmed).join(".cc-switch");
-                    if legacy_dir.join("cc-switch.db").exists() {
-                        log::info!(
-                            "Detected v3.10.3 legacy database at {}, using it instead of {}",
-                            legacy_dir.display(),
-                            default_dir.display()
-                        );
-                        return legacy_dir;
-                    }
-                }
+            let home_env = std::env::var("HOME").ok();
+            if let Some(legacy_dir) =
+                legacy_home_fallback_dir(home_env.as_deref(), has_test_home_override())
+            {
+                log::info!(
+                    "Detected v3.10.3 legacy database at {}, using it instead of {}",
+                    legacy_dir.display(),
+                    default_dir.display()
+                );
+                return legacy_dir;
             }
         }
     }
@@ -519,6 +558,52 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&sorted_a).unwrap(),
             serde_json::to_string(&sorted_b).unwrap(),
+        );
+    }
+
+    #[test]
+    fn test_home_override_requires_a_non_empty_value() {
+        assert!(!is_valid_test_home(None));
+        assert!(!is_valid_test_home(Some("")));
+        assert!(!is_valid_test_home(Some("   ")));
+        assert!(is_valid_test_home(Some("C:\\tmp\\cc-test-home")));
+    }
+
+    /// `CC_SWITCH_TEST_HOME` must fully isolate the config dir on Windows.
+    ///
+    /// Regression: the v3.10.3 legacy fallback read the plain `HOME` variable
+    /// even while a test home was active, so the Rust suite wrote into the real
+    /// `~/.cc-switch` (three duplicate `custom-model` rows in `model-pricing.json`).
+    #[cfg(windows)]
+    #[test]
+    fn test_home_override_disables_legacy_home_fallback() {
+        let real_home = tempfile::tempdir().expect("real home");
+
+        // A legacy database that would otherwise win the v3.10.3 fallback.
+        let legacy_dir = real_home.path().join(".cc-switch");
+        fs::create_dir_all(&legacy_dir).expect("legacy dir");
+        fs::write(legacy_dir.join("cc-switch.db"), b"").expect("legacy db");
+        let home_env = real_home.path().to_string_lossy().to_string();
+
+        // Real users: the v3.10.3 fallback still finds the legacy database.
+        assert_eq!(
+            legacy_home_fallback_dir(Some(&home_env), false),
+            Some(legacy_dir.clone())
+        );
+
+        // Tests: an active test home wins outright, so the real user directory
+        // can never be picked up.
+        assert_eq!(legacy_home_fallback_dir(Some(&home_env), true), None);
+
+        // Unset or empty `HOME` keeps the previous behaviour.
+        assert_eq!(legacy_home_fallback_dir(None, false), None);
+        assert_eq!(legacy_home_fallback_dir(Some("   "), false), None);
+
+        // No legacy database at all: nothing to fall back to.
+        let empty_home = tempfile::tempdir().expect("empty home");
+        assert_eq!(
+            legacy_home_fallback_dir(Some(&empty_home.path().to_string_lossy()), false),
+            None
         );
     }
 }
