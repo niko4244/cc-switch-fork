@@ -2087,6 +2087,21 @@ pub(crate) fn is_placeholder_pricing_model(model_id: &str) -> bool {
     normalized.is_empty() || matches!(normalized.as_str(), "unknown" | "null" | "none")
 }
 
+/// 聚合网关回显的「不是模型名的模型名」。
+///
+/// 这些值由聚合层产生（Brainz Chain 回 `auto`），既不是可计价模型，也不代表用户
+/// 实际调用的上游；按它们查价只会把成本静默记成 0，而用户为真正调用的模型
+/// （如 `brainz-chain`）建的定价行永远用不上。
+///
+/// 清单刻意保守：宁可漏判（继续用响应侧名字），也不要把上游真实模型名误判成
+/// 别名而套错价表行。
+pub(crate) fn is_gateway_model_alias(model_id: &str) -> bool {
+    matches!(
+        model_id.trim().to_ascii_lowercase().as_str(),
+        "auto" | "default" | "router" | "balancer" | "gateway" | "proxy"
+    )
+}
+
 fn query_model_pricing_exact(
     conn: &Connection,
     model_id: &str,

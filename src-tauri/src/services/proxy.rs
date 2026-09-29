@@ -2774,6 +2774,12 @@ impl ProxyService {
                     .map_err(|e| format!("更新 Codex 上游模型失败: {e}"))?;
         }
 
+        // 本地代理只有 HTTP/SSE：区块里若残留 supports_websockets = true，Codex
+        // 每轮都会先打一次注定 405 的 WebSocket 升级，重试 5 次（约 6 秒）后才
+        // 回退 HTTPS，界面上显示 "Reconnecting 5/5"。
+        let updated = crate::codex_config::disable_codex_active_model_provider_websockets(&updated)
+            .map_err(|e| format!("关闭 Codex WebSocket 传输失败: {e}"))?;
+
         Ok(updated)
     }
 
@@ -5131,6 +5137,55 @@ wire_api = "chat"
         assert_eq!(
             provider.get("wire_api").and_then(|v| v.as_str()),
             Some("responses")
+        );
+    }
+
+    #[test]
+    fn apply_codex_proxy_toml_config_disables_websockets_for_the_proxy() {
+        // The live file that `` §6.5 re-keys: the block it inherits from still
+        // advertises websockets, which the local proxy does not serve.
+        let live = r#"model_provider = "litellm"
+model = "brainz-chain"
+
+[model_providers.litellm]
+name = "LiteLLM Gateway"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+supports_websockets = true
+"#;
+        let stored = r#"model_provider = "brainz"
+model = "brainz-chain"
+
+[model_providers.brainz]
+name = "Brainz Chain"
+base_url = "https://api.example/v1"
+wire_api = "responses"
+supports_websockets = true
+"#;
+        let mut provider = Provider::with_id(
+            "brainz-proxy".to_string(),
+            "Brainz Chain".to_string(),
+            json!({ "config": stored }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("chat_completions".to_string()),
+            ..Default::default()
+        });
+
+        let output = ProxyService::apply_codex_proxy_toml_config_for_provider(
+            live,
+            "http://127.0.0.1:15721/v1",
+            Some(&provider),
+        )
+        .expect("apply proxy config");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+
+        assert_eq!(parsed["model_provider"].as_str(), Some("brainz"));
+        assert_eq!(
+            parsed["model_providers"]["brainz"]["supports_websockets"].as_bool(),
+            Some(false),
+            "Codex must not spend ~6s per turn on a doomed websocket upgrade"
         );
     }
 

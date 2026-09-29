@@ -5,7 +5,9 @@ use super::parser::TokenUsage;
 use crate::database::{Database, PRICING_SOURCE_REQUEST, PRICING_SOURCE_RESPONSE};
 use crate::error::AppError;
 use crate::services::sql_helpers::{INPUT_TOKEN_SEMANTICS_FRESH, INPUT_TOKEN_SEMANTICS_TOTAL};
-use crate::services::usage_stats::{find_model_pricing_row, is_placeholder_pricing_model};
+use crate::services::usage_stats::{
+    find_model_pricing_row, is_gateway_model_alias, is_placeholder_pricing_model,
+};
 use rusqlite::OptionalExtension;
 use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
@@ -460,6 +462,20 @@ impl<'a> UsageLogger<'a> {
         provider_type: Option<String>,
         is_streaming: bool,
     ) -> Result<(), AppError> {
+        // 响应侧只回了一个网关别名时，改按请求侧模型计价。
+        //
+        // 聚合网关（Brainz Chain 等）在响应里回 `auto` 而不是真的模型名，按它查价
+        // 必然落空：成本静默记 0、USG-002 刷屏，而用户为真正调用的模型建的定价行
+        // 永远用不上。请求侧模型是本地代理确知的事实，因此优先拿它兜底；记录时也
+        // 换成实际计价的名字，账目才对得上。
+        let mut pricing_model = pricing_model;
+        if is_gateway_model_alias(&pricing_model) && !is_placeholder_pricing_model(&request_model) {
+            log::debug!(
+                "[USG-004] 上游回显网关别名 {pricing_model}，改用请求侧模型 {request_model} 计价"
+            );
+            pricing_model = request_model.clone();
+        }
+
         let pricing = self.get_model_pricing(&pricing_model)?;
 
         let has_usage = usage.input_tokens > 0
@@ -799,6 +815,102 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(semantics, INPUT_TOKEN_SEMANTICS_TOTAL);
+        Ok(())
+    }
+
+    fn seed_brainz_pricing(db: &Database) -> Result<(), AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        conn.execute(
+            "INSERT INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
+             VALUES ('brainz-chain', 'Brainz Chain', '10', '10')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    fn priced_usage(model: &str) -> TokenUsage {
+        TokenUsage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            model: Some(model.to_string()),
+            message_id: Some(format!("chatcmpl-{model}")),
+        }
+    }
+
+    /// 聚合网关回显 `auto` 时，账要按用户为真正调用的模型建的价表行来算。
+    #[test]
+    fn gateway_model_alias_prices_on_the_request_model() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_brainz_pricing(&db)?;
+
+        UsageLogger::new(&db).log_with_calculation(
+            "req-alias".to_string(),
+            "brainz-proxy".to_string(),
+            "codex".to_string(),
+            "auto".to_string(),         // 上游回显的模型
+            "brainz-chain".to_string(), // 请求侧模型
+            "auto".to_string(),         // 响应侧计价的默认模式
+            priced_usage("auto"),
+            Decimal::from_str("1").unwrap(),
+            10,
+            None,
+            200,
+            None,
+            None,
+            false,
+        )?;
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let (pricing_model, cost): (String, String) = conn.query_row(
+            "SELECT pricing_model, total_cost_usd FROM proxy_request_logs WHERE request_id = 'req-alias'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(pricing_model, "brainz-chain");
+        assert_eq!(
+            Decimal::from_str(&cost).unwrap(),
+            Decimal::from_str("20").unwrap(),
+            "the row must be priced by the model the caller actually asked for"
+        );
+        Ok(())
+    }
+
+    /// 上游回了个真模型名（只是没价）时不得换成请求别名：那会用错价表行。
+    #[test]
+    fn real_upstream_model_names_keep_their_own_row() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        seed_brainz_pricing(&db)?;
+
+        UsageLogger::new(&db).log_with_calculation(
+            "req-unknown-model".to_string(),
+            "brainz-proxy".to_string(),
+            "codex".to_string(),
+            "gpt-9-preview".to_string(),
+            "brainz-chain".to_string(),
+            "gpt-9-preview".to_string(),
+            priced_usage("gpt-9-preview"),
+            Decimal::from_str("1").unwrap(),
+            10,
+            None,
+            200,
+            None,
+            None,
+            false,
+        )?;
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let (pricing_model, cost): (String, String) = conn.query_row(
+            "SELECT pricing_model, total_cost_usd FROM proxy_request_logs WHERE request_id = 'req-unknown-model'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(pricing_model, "gpt-9-preview");
+        assert_eq!(
+            Decimal::from_str(&cost).unwrap(),
+            Decimal::from_str("0").unwrap()
+        );
         Ok(())
     }
 }

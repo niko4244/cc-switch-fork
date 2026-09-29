@@ -1941,6 +1941,53 @@ pub fn point_codex_active_model_provider(
     Ok(doc.to_string())
 }
 
+/// 强制活动 `[model_providers.<key>]` 区块的 `supports_websockets = false`。
+///
+/// 本地代理只提供 HTTP/SSE（`POST /responses`），没有 WebSocket 路由。区块里若
+/// 残留 `supports_websockets = true`（历史遗留，或 §6.5 改名时从官方区块继承），
+/// Codex 会先连 `ws://127.0.0.1:<port>/v1/responses`，吃一个 405，重试 5 次后才
+/// 回退 HTTPS —— 每轮对话白白浪费约 6 秒，界面上就是 "Reconnecting 5/5"。
+///
+/// 只在键存在且不是 `false` 时改写，已正确的 live 文件保持逐字节不变；键不存在时
+/// 不凭空写入（自定义 provider 默认就不带 WebSocket 传输）。
+pub fn disable_codex_active_model_provider_websockets(
+    config_text: &str,
+) -> Result<String, AppError> {
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    let Some(provider_key) = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::to_string)
+    else {
+        return Ok(config_text.to_string());
+    };
+
+    let Some(block) = doc
+        .get_mut("model_providers")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .and_then(|providers| providers.get_mut(&provider_key))
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return Ok(config_text.to_string());
+    };
+
+    let needs_disable = block
+        .get("supports_websockets")
+        .is_some_and(|item| item.as_bool() != Some(false));
+    if !needs_disable {
+        return Ok(config_text.to_string());
+    }
+
+    block.insert("supports_websockets", toml_edit::value(false));
+    log::info!(
+        "Codex 区块 {provider_key} 的 supports_websockets 已设为 false（本地代理仅支持 HTTP/SSE）"
+    );
+    Ok(doc.to_string())
+}
+
 /// Whether a live Codex config is the official route projected by CC Switch.
 pub fn codex_config_has_official_proxy_route(config_text: &str) -> bool {
     if !config_text.contains(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID) {
@@ -4639,5 +4686,88 @@ model_catalog_json = "cc-switch-model-catalog.json"
         });
 
         assert!(!codex_auth_is_stale_login(&blank, &live));
+    }
+
+    /// 本地代理只服务 HTTP/SSE；区块里的 `true` 会让 Codex 每轮先打一次注定 405
+    /// 的 `ws://…` 升级、重试 5 次后才回退 HTTPS（约 6 秒）。
+    #[test]
+    fn disabling_websockets_flips_the_active_proxy_block() {
+        let config = r#"model_provider = "brainz"
+model = "brainz-chain"
+
+[model_providers.brainz]
+name = "Brainz Chain"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+supports_websockets = true
+requires_openai_auth = true
+
+[model_providers.custom]
+name = "OpenAI"
+supports_websockets = true
+"#;
+
+        let updated = disable_codex_active_model_provider_websockets(config).expect("disable");
+        let doc = updated.parse::<DocumentMut>().expect("parse");
+
+        assert_eq!(
+            doc["model_providers"]["brainz"]
+                .get("supports_websockets")
+                .and_then(|item| item.as_bool()),
+            Some(false),
+            "the active proxy block must stop advertising a transport the proxy lacks"
+        );
+        // Everything else in the block comes through untouched.
+        assert_eq!(
+            doc["model_providers"]["brainz"]
+                .get("requires_openai_auth")
+                .and_then(|item| item.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            doc["model_providers"]["brainz"]
+                .get("base_url")
+                .and_then(|item| item.as_str()),
+            Some("http://127.0.0.1:15721/v1")
+        );
+        // Another provider's block is not ours to change.
+        assert_eq!(
+            doc["model_providers"]["custom"]
+                .get("supports_websockets")
+                .and_then(|item| item.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn disabling_websockets_leaves_correct_configs_byte_identical() {
+        for config in [
+            "model_provider = \"x\"\n\n[model_providers.x]\nsupports_websockets = false\n",
+            // No key: a custom entry has no websocket transport unless it opts in.
+            "model_provider = \"x\"\n\n[model_providers.x]\nbase_url = \"http://127.0.0.1:15721/v1\"\n",
+            // Nothing to act on: no active provider, and no such block.
+            "[model_providers.x]\nsupports_websockets = true\n",
+            "model_provider = \"missing\"\n\n[model_providers.other]\nsupports_websockets = true\n",
+        ] {
+            let updated = disable_codex_active_model_provider_websockets(config).expect("no-op");
+            assert_eq!(updated, config, "an already-correct live file must not churn");
+        }
+    }
+
+    #[test]
+    fn disabling_websockets_handles_inline_tables_and_odd_values() {
+        let config =
+            "model_provider = \"x\"\nmodel_providers = { x = { supports_websockets = \"true\" } }\n";
+
+        let updated = disable_codex_active_model_provider_websockets(config).expect("disable");
+        let doc = updated.parse::<DocumentMut>().expect("parse");
+
+        assert_eq!(
+            doc["model_providers"]["x"]
+                .get("supports_websockets")
+                .and_then(|item| item.as_bool()),
+            Some(false),
+            "a non-boolean value must be replaced with a real bool"
+        );
     }
 }
