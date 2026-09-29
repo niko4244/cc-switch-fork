@@ -65,19 +65,25 @@ export function RouteStatusStrip({
     );
   }
 
+  // Decisions now survive a restart, so a record can be older than the current
+  // intent: if the mode changed since it was written (or nothing was ever
+  // routed), it no longer describes what will answer and must not be presented
+  // as the actual route.
+  const recorded = actual?.mode === mode ? actual : null;
+
   const predictedProviderId = providersData?.currentProviderId ?? "";
   const predictedProvider = providersData?.providers[predictedProviderId];
 
   const providerName =
-    actual?.effectiveProviderName ?? predictedProvider?.name ?? null;
-  const upstreamUrl = actual?.upstreamBaseUrl ?? null;
-  const selectionIgnored = actual?.selectionIgnored ?? false;
-  const errorMessage = actual?.lastErrorCode
-    ? ERROR_MESSAGES[actual.lastErrorCode]
+    recorded?.effectiveProviderName ?? predictedProvider?.name ?? null;
+  const upstreamUrl = recorded?.upstreamBaseUrl ?? null;
+  const selectionIgnored = recorded?.selectionIgnored ?? false;
+  const errorMessage = recorded?.lastErrorCode
+    ? ERROR_MESSAGES[recorded.lastErrorCode]
     : undefined;
-  // No recorded decision yet: what is shown is derived from the mode, not from
-  // an actual request, so say so.
-  const isPredicted = !actual;
+  // Nothing routed in this mode: what is shown is derived from the mode, not
+  // from an actual request, so say so.
+  const isPredicted = !recorded;
 
   return (
     <div
@@ -135,7 +141,7 @@ export function RouteStatusStrip({
       )}
       {errorMessage && (
         <span className="shrink-0 rounded bg-red-500/15 px-1 text-red-700 dark:text-red-400">
-          {errorMessage} ({actual?.lastErrorCode})
+          {errorMessage} ({recorded?.lastErrorCode})
         </span>
       )}
     </div>

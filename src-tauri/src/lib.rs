@@ -744,6 +744,15 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Provider state repair failed: {e}"),
             }
 
+            // Remember the route the proxy actually used, so the header can state
+            // it immediately on launch instead of falling back to a prediction.
+            // Persistence is opt-in so routing unit tests never write here.
+            crate::proxy::active_route::enable_persistence();
+            let restored_routes = crate::proxy::active_route::load_persisted();
+            if restored_routes > 0 {
+                log::info!("✓ Restored {restored_routes} active-route record(s)");
+            }
+
             {
                 let db_for_codex_history_migration = app_state.db.clone();
                 tauri::async_runtime::spawn_blocking(move || {

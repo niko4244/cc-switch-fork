@@ -69,9 +69,7 @@ describe("RouteStatusStrip", () => {
     renderStrip("failover");
 
     expect(await screen.findByText("LiteLLM Gateway")).toBeInTheDocument();
-    expect(
-      screen.getByText("http://127.0.0.1:4000/v1"),
-    ).toBeInTheDocument();
+    expect(screen.getByText("http://127.0.0.1:4000/v1")).toBeInTheDocument();
     // This single label is the whole point: failover, not the selection, routed
     // the request.
     expect(screen.getByText("selection ignored")).toBeInTheDocument();
@@ -118,6 +116,19 @@ describe("RouteStatusStrip", () => {
       await screen.findByText(/No provider to route to/),
     ).toBeInTheDocument();
     expect(screen.getByText(/\(FO-005\)/)).toBeInTheDocument();
+  });
+
+  it("ignores a persisted route recorded under a different mode", async () => {
+    // The record survives restarts, so it can be older than the current intent:
+    // a failover record must not be shown as the actual route for `selected`.
+    getActiveRoute.mockResolvedValue(route({ selectionIgnored: true }));
+
+    renderStrip("selected");
+
+    expect(await screen.findByText("Brainz Chain")).toBeInTheDocument();
+    expect(screen.getByText("predicted")).toBeInTheDocument();
+    expect(screen.queryByText("selection ignored")).not.toBeInTheDocument();
+    expect(screen.queryByText("LiteLLM Gateway")).not.toBeInTheDocument();
   });
 
   it("states that native traffic bypasses the proxy", () => {
