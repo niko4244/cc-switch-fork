@@ -66,6 +66,7 @@ import { EditProviderDialog } from "@/components/providers/EditProviderDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { SettingsPage } from "@/components/settings/SettingsPage";
 import { UpdateBadge } from "@/components/UpdateBadge";
+import { ForkBuildBadge } from "@/components/ForkBuildBadge";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { ClaudeDesktopRouteToggle } from "@/components/proxy/ClaudeDesktopRouteToggle";
 import { RoutingModeControl } from "@/components/proxy/RoutingModeControl";
@@ -1216,6 +1217,14 @@ function App() {
                     CC Switch
                   </a>
                 </div>
+                {/* Which build is actually running, visible without opening
+                    Settings → About. */}
+                <ForkBuildBadge
+                  onClick={() => {
+                    setSettingsDefaultTab("about");
+                    setCurrentView("settings");
+                  }}
+                />
                 <Button
                   variant="ghost"
                   size="icon"

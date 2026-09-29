@@ -134,6 +134,15 @@ vi.mock("@/components/UpdateBadge", () => ({
   ),
 }));
 
+// Stubbed for the same reason as UpdateBadge: this file is about App's provider
+// flows, and the real badge would add a fork-identity round trip to every mount.
+// ForkBuildBadge has its own component test.
+vi.mock("@/components/ForkBuildBadge", () => ({
+  ForkBuildBadge: ({ onClick }: any) => (
+    <button onClick={onClick}>fork-build-badge</button>
+  ),
+}));
+
 vi.mock("@/components/mcp/McpPanel", () => ({
   default: ({ open, onOpenChange }: any) =>
     open ? (
@@ -219,6 +228,15 @@ describe("App integration with MSW", () => {
     expect(toastErrorMock).not.toHaveBeenCalled();
     expect(toastSuccessMock).toHaveBeenCalled();
   }, 10_000);
+
+  it("puts the installed fork build on the main window", async () => {
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    // The main window, not just Settings → About: a stale or replaced binary
+    // has to be visible without navigating anywhere.
+    expect(await screen.findByText("fork-build-badge")).toBeInTheDocument();
+  });
 
   it("shows toast when auto sync fails in background", async () => {
     const { default: App } = await import("@/App");

@@ -1,6 +1,8 @@
 {
   "fork": {
     "title": "Fork build",
+    "badgeLabel": "fork {{commit}}",
+    "badgeTitle": "{{build}} — official updater: {{state}}",
     "statePinned": "Pinned",
     "stateOfficial": "Official channel",
     "stateOfficialPending": "Opt-in pending restart",

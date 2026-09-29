@@ -1,6 +1,8 @@
 {
   "fork": {
     "title": "Fork 建置",
+    "badgeLabel": "fork {{commit}}",
+    "badgeTitle": "{{build}} — 官方更新器：{{state}}",
     "statePinned": "已固定",
     "stateOfficial": "官方更新通道",
     "stateOfficialPending": "已開啟，重新啟動後生效",
