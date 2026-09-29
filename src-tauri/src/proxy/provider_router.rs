@@ -145,7 +145,11 @@ impl ProviderRouter {
         }
 
         if let Some(winner) = result.first() {
-            log::info!("[{app_type}] 本次请求目标供应商: {} ({})", winner.id, winner.name);
+            log::info!(
+                "[{app_type}] 本次请求目标供应商: {} ({})",
+                winner.id,
+                winner.name
+            );
             // 决策在此做出，就在这里记录下来：日志之外的调用方（`get_active_route`）
             // 才能回答“到底哪个上游会真正应答”。
             self.record_active_route(
@@ -184,13 +188,11 @@ impl ProviderRouter {
         let selection_ignored = auto_failover_enabled
             && selected_id.is_some_and(|selected| selected != winner.id.as_str());
 
-        let upstream_base_url = AppType::from_str(app_type)
-            .ok()
-            .and_then(|app| {
-                crate::proxy::providers::get_adapter(&app)
-                    .extract_base_url(winner)
-                    .ok()
-            });
+        let upstream_base_url = AppType::from_str(app_type).ok().and_then(|app| {
+            crate::proxy::providers::get_adapter(&app)
+                .extract_base_url(winner)
+                .ok()
+        });
 
         crate::proxy::active_route::record_selection(
             app_type,

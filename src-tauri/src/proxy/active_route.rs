@@ -164,7 +164,7 @@ fn should_persist(decision_changed: bool, last_persist_at: Option<i64>, now: i64
         return true;
     }
 
-    last_persist_at.map_or(true, |at| now.saturating_sub(at) >= CONFIRMATION_REFRESH_SECS)
+    last_persist_at.is_none_or(|at| now.saturating_sub(at) >= CONFIRMATION_REFRESH_SECS)
 }
 
 fn persisted_file_path() -> PathBuf {
@@ -387,7 +387,10 @@ fn load_from_path(path: &Path) -> usize {
 
     if loaded > 0 {
         // 刚读回来的心跳时间也要认：否则启动后第一个请求会立刻又写一次。
-        let newest = routes.values().filter_map(|route| route.last_confirmed_at).max();
+        let newest = routes
+            .values()
+            .filter_map(|route| route.last_confirmed_at)
+            .max();
         if let Some(newest) = newest {
             LAST_PERSIST_AT.store(newest, Ordering::Relaxed);
         }
@@ -491,10 +494,7 @@ mod tests {
         let provider = provider("p1", "Provider One");
 
         record_error(app, crate::proxy::log_codes::fo::NO_PROVIDERS);
-        assert_eq!(
-            view(app).last_error_code.as_deref(),
-            Some("FO-005")
-        );
+        assert_eq!(view(app).last_error_code.as_deref(), Some("FO-005"));
 
         record(
             app,
@@ -508,7 +508,10 @@ mod tests {
         assert_eq!(route.app_type, app);
         assert_eq!(route.mode, MODE_SELECTED);
         assert_eq!(route.effective_provider_id.as_deref(), Some("p1"));
-        assert_eq!(route.effective_provider_name.as_deref(), Some("Provider One"));
+        assert_eq!(
+            route.effective_provider_name.as_deref(),
+            Some("Provider One")
+        );
         assert_eq!(
             route.upstream_base_url.as_deref(),
             Some("https://relay.example.com/v1")
@@ -582,23 +585,35 @@ mod tests {
     #[test]
     fn changed_inputs_mark_the_record_as_no_longer_current() {
         let app = "active-route-test-inputs";
-        record(app, MODE_FAILOVER, &provider("queue-p1", "Queue P1"), true, None);
+        record(
+            app,
+            MODE_FAILOVER,
+            &provider("queue-p1", "Queue P1"),
+            true,
+            None,
+        );
 
         let matching = inputs(MODE_FAILOVER);
         assert!(!snapshot(app, Some(&matching)).unwrap().inputs_changed);
 
         let mut selected_changed = matching.clone();
         selected_changed.selected_provider_id = Some("another-provider".to_string());
-        assert!(snapshot(app, Some(&selected_changed)).unwrap().inputs_changed);
+        assert!(
+            snapshot(app, Some(&selected_changed))
+                .unwrap()
+                .inputs_changed
+        );
 
         let mut queue_changed = matching.clone();
         queue_changed.failover_queue = vec!["p2".to_string()];
         assert!(snapshot(app, Some(&queue_changed)).unwrap().inputs_changed);
 
         // Takeover released: nothing is proxied any more, so the record is history.
-        assert!(snapshot(app, Some(&inputs(MODE_NATIVE)))
-            .unwrap()
-            .inputs_changed);
+        assert!(
+            snapshot(app, Some(&inputs(MODE_NATIVE)))
+                .unwrap()
+                .inputs_changed
+        );
 
         let mut url_changed = matching.clone();
         url_changed.effective_base_url = Some("https://moved.example.com/v1".to_string());
@@ -615,7 +630,13 @@ mod tests {
     #[test]
     fn without_current_inputs_a_record_is_returned_unverified() {
         let app = "active-route-test-unverified";
-        record(app, MODE_SELECTED, &provider("p1", "Provider One"), false, None);
+        record(
+            app,
+            MODE_SELECTED,
+            &provider("p1", "Provider One"),
+            false,
+            None,
+        );
 
         assert!(!snapshot(app, None).unwrap().inputs_changed);
 
@@ -767,7 +788,10 @@ mod tests {
         assert_eq!(route.effective_provider_id.as_deref(), Some("queue-p1"));
         assert_eq!(route.mode, MODE_FAILOVER);
         assert!(route.selection_ignored);
-        assert_eq!(route.upstream_base_url.as_deref(), Some("https://relay.example.com/v1"));
+        assert_eq!(
+            route.upstream_base_url.as_deref(),
+            Some("https://relay.example.com/v1")
+        );
 
         clear(app);
     }
@@ -782,10 +806,7 @@ mod tests {
         record(app, MODE_SELECTED, &provider("live", "Live"), false, None);
 
         assert_eq!(load_from_path(&path), 0);
-        assert_eq!(
-            view(app).effective_provider_id.as_deref(),
-            Some("live")
-        );
+        assert_eq!(view(app).effective_provider_id.as_deref(), Some("live"));
 
         clear(app);
     }
@@ -835,7 +856,10 @@ mod tests {
             path.file_name().and_then(|name| name.to_str()),
             Some(PERSISTED_FILE_NAME)
         );
-        assert_eq!(path.parent(), Some(crate::config::get_app_config_dir().as_path()));
+        assert_eq!(
+            path.parent(),
+            Some(crate::config::get_app_config_dir().as_path())
+        );
     }
 
     /// 错误码描述本进程的失败，跨重启复活成红色警告只会误导。
@@ -850,7 +874,10 @@ mod tests {
         write_sample(&path, app, entry);
 
         let raw = std::fs::read_to_string(&path).expect("read cache");
-        assert!(!raw.contains("FO-005"), "the error code must not be written");
+        assert!(
+            !raw.contains("FO-005"),
+            "the error code must not be written"
+        );
 
         assert_eq!(load_from_path(&path), 1);
         assert_eq!(view(app).last_error_code, None);
@@ -876,7 +903,10 @@ mod tests {
         enable_persistence();
 
         let path = persisted_file_path();
-        assert_eq!(path, dir.path().join(".cc-switch").join(PERSISTED_FILE_NAME));
+        assert_eq!(
+            path,
+            dir.path().join(".cc-switch").join(PERSISTED_FILE_NAME)
+        );
 
         // A decision change writes itself out on the way past.
         record(
@@ -889,7 +919,10 @@ mod tests {
         assert!(path.exists(), "a decision change must be persisted");
 
         // Repeating the same decision must not rewrite the cache.
-        let first_write = std::fs::metadata(&path).expect("stat cache").modified().expect("mtime");
+        let first_write = std::fs::metadata(&path)
+            .expect("stat cache")
+            .modified()
+            .expect("mtime");
         std::thread::sleep(std::time::Duration::from_millis(1100));
         record(
             "codex",
@@ -899,7 +932,10 @@ mod tests {
             Some("http://127.0.0.1:4000/v1"),
         );
         assert_eq!(
-            std::fs::metadata(&path).expect("stat cache").modified().expect("mtime"),
+            std::fs::metadata(&path)
+                .expect("stat cache")
+                .modified()
+                .expect("mtime"),
             first_write,
             "an unchanged decision must not touch the disk"
         );

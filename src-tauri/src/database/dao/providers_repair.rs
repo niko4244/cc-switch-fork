@@ -194,7 +194,9 @@ pub(crate) fn repair_provider_state_on_conn(
 
 fn app_types_with_official_rows(conn: &Connection) -> Result<Vec<String>, AppError> {
     let mut stmt = conn
-        .prepare("SELECT DISTINCT app_type FROM providers WHERE category = 'official' ORDER BY app_type")
+        .prepare(
+            "SELECT DISTINCT app_type FROM providers WHERE category = 'official' ORDER BY app_type",
+        )
         .map_err(|e| AppError::Database(e.to_string()))?;
     let rows = stmt
         .query_map([], |row| row.get::<_, String>(0))
@@ -432,17 +434,17 @@ fn parse_login_timestamp(value: &Value) -> Option<i64> {
     if let Ok(parsed) = DateTime::parse_from_str(text, "%Y-%m-%dT%H:%M:%S%.f%z") {
         return Some(parsed.with_timezone(&Utc).timestamp_millis());
     }
-    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S"] {
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+    ] {
         if let Ok(naive) = NaiveDateTime::parse_from_str(text, format) {
             return Some(naive.and_utc().timestamp_millis());
         }
     }
     if let Ok(date) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
-        return Some(
-            date.and_hms_opt(0, 0, 0)?
-                .and_utc()
-                .timestamp_millis(),
-        );
+        return Some(date.and_hms_opt(0, 0, 0)?.and_utc().timestamp_millis());
     }
 
     None
@@ -451,9 +453,7 @@ fn parse_login_timestamp(value: &Value) -> Option<i64> {
 /// 每个 app 只保留一个 `is_current`（重复标记会导致"切回官方"落到不确定的行上）。
 fn enforce_single_current_per_app(conn: &Connection) -> Result<usize, AppError> {
     let mut stmt = conn
-        .prepare(
-            "SELECT app_type FROM providers GROUP BY app_type HAVING SUM(is_current) > 1",
-        )
+        .prepare("SELECT app_type FROM providers GROUP BY app_type HAVING SUM(is_current) > 1")
         .map_err(|e| AppError::Database(e.to_string()))?;
     let apps = stmt
         .query_map([], |row| row.get::<_, String>(0))
@@ -631,15 +631,13 @@ mod tests {
     }
 
     fn login_at(db: &Database, app_type: &str, id: &str) -> Option<String> {
-        db.get_provider_by_id(id, app_type)
-            .unwrap()
-            .and_then(|p| {
-                p.settings_config
-                    .get("auth")
-                    .and_then(|auth| auth.get("last_refresh"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
+        db.get_provider_by_id(id, app_type).unwrap().and_then(|p| {
+            p.settings_config
+                .get("auth")
+                .and_then(|auth| auth.get("last_refresh"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
     }
 
     #[test]
@@ -724,10 +722,16 @@ mod tests {
         let db = Database::memory().unwrap();
 
         // 两行都不是内置种子：不删任何东西
-        db.save_provider("codex", &official_provider("a", Some("2026-01-01T00:00:00Z")))
-            .unwrap();
-        db.save_provider("codex", &official_provider("b", Some("2026-02-01T00:00:00Z")))
-            .unwrap();
+        db.save_provider(
+            "codex",
+            &official_provider("a", Some("2026-01-01T00:00:00Z")),
+        )
+        .unwrap();
+        db.save_provider(
+            "codex",
+            &official_provider("b", Some("2026-02-01T00:00:00Z")),
+        )
+        .unwrap();
 
         let report = db
             .repair_provider_state(RepairScope::STARTUP)
@@ -758,7 +762,10 @@ mod tests {
 
         let second = db.repair_provider_state(RepairScope::STARTUP).unwrap();
         assert!(second.is_noop(), "第二次运行必须是无操作: {second:?}");
-        assert!(db.get_provider_by_id("codex-official", "codex").unwrap().is_some());
+        assert!(db
+            .get_provider_by_id("codex-official", "codex")
+            .unwrap()
+            .is_some());
         assert!(db.get_provider_by_id("default", "codex").unwrap().is_none());
     }
 
@@ -834,7 +841,10 @@ mod tests {
         }
 
         // 只剩种子行，且换上了较新的登录态
-        assert!(db.get_provider_by_id("codex-official", "codex").unwrap().is_some());
+        assert!(db
+            .get_provider_by_id("codex-official", "codex")
+            .unwrap()
+            .is_some());
         assert!(db.get_provider_by_id("default", "codex").unwrap().is_none());
         assert_eq!(
             login_at(&db, "codex", "codex-official").as_deref(),
@@ -964,7 +974,11 @@ mod tests {
                 .expect("CC_SWITCH_REPAIR_OUTPUT_DIR must point at a writable dir"),
         );
         let fixture_db = fixture.join(".cc-switch").join("cc-switch.db");
-        assert!(fixture_db.exists(), "fixture db missing: {}", fixture_db.display());
+        assert!(
+            fixture_db.exists(),
+            "fixture db missing: {}",
+            fixture_db.display()
+        );
 
         // 每次都从夹具重新开始，保证可重复运行。
         if output.exists() {
@@ -1048,19 +1062,35 @@ mod tests {
         );
 
         // gemini：同样合并，但故障转移开着，队列必须原样保留。
-        assert_eq!(official_ids(&conn, "gemini"), vec!["gemini-official".to_string()]);
+        assert_eq!(
+            official_ids(&conn, "gemini"),
+            vec!["gemini-official".to_string()]
+        );
         let gemini_auth = official_settings(&conn, "gemini", "gemini-official");
         assert_eq!(
             gemini_auth.pointer("/auth/apiKey").and_then(Value::as_str),
             Some("FIXTURE-GEMINI-FRESH-LOGIN")
         );
-        assert_eq!(queued_count(&conn, "gemini"), 1, "failover-on queue must survive");
+        assert_eq!(
+            queued_count(&conn, "gemini"),
+            1,
+            "failover-on queue must survive"
+        );
 
         // claude 本来就没有重复官方行：一行都不能少，队列原样保留。
-        assert_eq!(official_ids(&conn, "claude"), vec!["claude-official".to_string()]);
+        assert_eq!(
+            official_ids(&conn, "claude"),
+            vec!["claude-official".to_string()]
+        );
         assert_eq!(queued_count(&conn, "claude"), 12);
-        assert_eq!(official_ids(&conn, "claude-desktop"), vec!["claude-desktop-official".to_string()]);
-        assert_eq!(official_ids(&conn, "grokbuild"), vec!["grokbuild-official".to_string()]);
+        assert_eq!(
+            official_ids(&conn, "claude-desktop"),
+            vec!["claude-desktop-official".to_string()]
+        );
+        assert_eq!(
+            official_ids(&conn, "grokbuild"),
+            vec!["grokbuild-official".to_string()]
+        );
 
         // 被删掉的行必须先落盘归档，绝不静默丢弃登录态。
         let archive = find_archive(&output);

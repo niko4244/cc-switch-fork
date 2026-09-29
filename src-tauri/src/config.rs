@@ -35,9 +35,7 @@ pub fn get_home_dir() -> PathBuf {
 
 /// `CC_SWITCH_TEST_HOME` 的值是否构成一次有效的 home 覆盖（空串不算）。
 fn is_valid_test_home(value: Option<&str>) -> bool {
-    value
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+    value.map(|value| !value.trim().is_empty()).unwrap_or(false)
 }
 
 /// 是否处于显式测试 home 覆盖（`CC_SWITCH_TEST_HOME`）。
