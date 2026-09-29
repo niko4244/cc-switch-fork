@@ -44,7 +44,7 @@ pub use circuit_breaker::{
     CircuitBreaker, CircuitBreakerConfig, CircuitBreakerStats, CircuitState,
 };
 #[allow(unused_imports)]
-pub use error::ProxyError;
+pub use error::{ProxyError, RoutingError};
 #[allow(unused_imports)]
 pub use provider_router::ProviderRouter;
 #[allow(unused_imports)]

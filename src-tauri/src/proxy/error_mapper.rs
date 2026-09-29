@@ -2,7 +2,7 @@
 //!
 //! 将 ProxyError 映射到合适的 HTTP 状态码，用于日志记录和手动构建错误响应
 
-use super::ProxyError;
+use super::{ProxyError, RoutingError};
 
 /// 将 ProxyError 映射到 HTTP 状态码
 ///
@@ -35,10 +35,10 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
         ProxyError::NoAvailableProvider => 503,
 
         // 所有供应商已熔断：503 Service Unavailable
-        ProxyError::AllProvidersCircuitOpen => 503,
+        ProxyError::AllProvidersCircuitOpen(_) => 503,
 
         // 未配置供应商：503 Service Unavailable
-        ProxyError::NoProvidersConfigured => 503,
+        ProxyError::NoProvidersConfigured(_) => 503,
 
         // 重试耗尽：503 Service Unavailable
         ProxyError::MaxRetriesExceeded => 503,
@@ -76,13 +76,29 @@ pub fn get_error_message(error: &ProxyError) -> String {
         ProxyError::Timeout(msg) => format!("请求超时: {msg}"),
         ProxyError::ForwardFailed(msg) => format!("转发失败: {msg}"),
         ProxyError::NoAvailableProvider => "无可用 Provider".to_string(),
-        ProxyError::AllProvidersCircuitOpen => "所有供应商已熔断，无可用渠道".to_string(),
-        ProxyError::NoProvidersConfigured => "未配置供应商".to_string(),
+        // 路由错误的文案来自 `RoutingError` 这一结构化元数据源（§6.4），
+        // 不再在本文件里各写一句硬编码文案。
+        ProxyError::AllProvidersCircuitOpen(info) | ProxyError::NoProvidersConfigured(info) => {
+            info.message.to_string()
+        }
         ProxyError::MaxRetriesExceeded => "所有 Provider 都失败，重试耗尽".to_string(),
         ProxyError::ProviderUnhealthy(msg) => format!("Provider 不健康: {msg}"),
         ProxyError::DatabaseError(msg) => format!("数据库错误: {msg}"),
         ProxyError::TransformError(msg) => format!("请求/响应转换错误: {msg}"),
         _ => error.to_string(),
+    }
+}
+
+/// 取路由失败的结构化元数据（`code` / `message` / `remedy`）。
+///
+/// 非路由错误返回 `None`，调用方据此决定是否附加 `code` / `remedy` 字段，
+/// 从而不必匹配具体的枚举变体。
+pub fn routing_error_meta(error: &ProxyError) -> Option<RoutingError> {
+    match error {
+        ProxyError::AllProvidersCircuitOpen(info) | ProxyError::NoProvidersConfigured(info) => {
+            Some(*info)
+        }
+        _ => None,
     }
 }
 
@@ -115,6 +131,61 @@ mod tests {
     fn test_map_no_provider_error() {
         let error = ProxyError::NoAvailableProvider;
         assert_eq!(map_proxy_error_to_status(&error), 503);
+    }
+
+    #[test]
+    fn test_map_routing_errors_to_503() {
+        assert_eq!(
+            map_proxy_error_to_status(&ProxyError::no_providers_configured()),
+            503
+        );
+        assert_eq!(
+            map_proxy_error_to_status(&ProxyError::all_providers_circuit_open()),
+            503
+        );
+    }
+
+    /// §6.4：路由错误的 message/remedy 来自单一结构化来源，而不是本文件里的硬编码文案。
+    #[test]
+    fn routing_errors_get_structured_codes_and_remedies() {
+        let no_providers = ProxyError::no_providers_configured();
+        let meta = routing_error_meta(&no_providers).expect("routing metadata");
+        assert_eq!(meta.code, "FO-005");
+        assert_eq!(
+            meta.message,
+            RoutingError::no_providers_configured().message
+        );
+        assert!(!meta.remedy.trim().is_empty());
+        assert_eq!(get_error_message(&no_providers), meta.message);
+
+        let circuit_open = ProxyError::all_providers_circuit_open();
+        let meta = routing_error_meta(&circuit_open).expect("routing metadata");
+        assert_eq!(meta.code, "FO-004");
+        assert_eq!(
+            meta.message,
+            RoutingError::all_providers_circuit_open().message
+        );
+        assert!(!meta.remedy.trim().is_empty());
+        assert_eq!(get_error_message(&circuit_open), meta.message);
+    }
+
+    /// 回归：路由文案不再是散落的中文字符串。
+    #[test]
+    fn routing_error_messages_are_not_hardcoded_chinese() {
+        for error in [
+            ProxyError::no_providers_configured(),
+            ProxyError::all_providers_circuit_open(),
+        ] {
+            let message = get_error_message(&error);
+            assert!(!message.contains("未配置供应商"));
+            assert!(!message.contains("所有供应商已熔断"));
+        }
+    }
+
+    #[test]
+    fn non_routing_errors_have_no_routing_metadata() {
+        assert!(routing_error_meta(&ProxyError::NoAvailableProvider).is_none());
+        assert!(routing_error_meta(&ProxyError::Timeout("t".to_string())).is_none());
     }
 
     #[test]

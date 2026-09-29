@@ -9,7 +9,7 @@
 
 use super::{
     content_encoding::{decompress_body, get_content_encoding, is_supported_content_encoding},
-    error_mapper::{get_error_message, map_proxy_error_to_status},
+    error_mapper::{get_error_message, map_proxy_error_to_status, routing_error_meta},
     forwarder::ActiveConnectionGuard,
     handler_config::{
         claude_stream_usage_event_filter, codex_stream_usage_event_filter, CLAUDE_PARSER_CONFIG,
@@ -1852,6 +1852,11 @@ fn codex_proxy_error_json(
         );
     }
 
+    // 路由错误附带可操作建议（§6.4），让 CLI 客户端也能直接照做。
+    if let Some(meta) = routing_error_meta(error) {
+        error_obj.insert("remedy".to_string(), Value::String(meta.remedy.to_string()));
+    }
+
     if !error_obj.contains_key("param") {
         error_obj.insert("param".to_string(), Value::Null);
     }
@@ -1881,8 +1886,10 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         ProxyError::ForwardFailed(_) => "cc_switch_forward_failed",
         ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => "cc_switch_timeout",
         ProxyError::NoAvailableProvider => "cc_switch_no_available_provider",
-        ProxyError::AllProvidersCircuitOpen => "cc_switch_all_providers_circuit_open",
-        ProxyError::NoProvidersConfigured => "cc_switch_no_providers_configured",
+        // 路由错误使用与 `active_route.last_error_code` / 前端 `RouteStatusStrip`
+        // 相同的 `FO-xxx` 稳定错误码（§6.4），前端不必再维护两套映射。
+        ProxyError::AllProvidersCircuitOpen(_) => crate::proxy::log_codes::fo::ALL_CIRCUIT_OPEN,
+        ProxyError::NoProvidersConfigured(_) => crate::proxy::log_codes::fo::NO_PROVIDERS,
         ProxyError::MaxRetriesExceeded => "cc_switch_max_retries_exceeded",
         ProxyError::ProviderUnhealthy(_) => "cc_switch_provider_unhealthy",
         ProxyError::ConfigError(_) => "cc_switch_config_error",
@@ -2657,7 +2664,7 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, chat_sse_to_response_value, classify_body_for_diagnostics,
-        codex_proxy_error_json, responses_sse_to_response_value,
+        codex_proxy_error_code, codex_proxy_error_json, responses_sse_to_response_value,
         should_use_claude_transform_streaming, transform, upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
@@ -3288,6 +3295,40 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
         assert_eq!(body["error"]["code"], "cc_switch_forward_failed");
         assert_eq!(body["error"]["provider"], "DeepSeek");
         assert_eq!(body["error"]["model"], "deepseek-chat");
+    }
+
+    /// §6.4：Codex 错误体应带上稳定路由码与可操作建议。
+    #[test]
+    fn codex_proxy_routing_error_carries_code_and_remedy() {
+        let no_providers = ProxyError::no_providers_configured();
+        assert_eq!(codex_proxy_error_code(&no_providers), "FO-005");
+        let body = codex_proxy_error_json("Codex", "gpt-5", "/responses", &no_providers);
+        assert_eq!(body["error"]["code"], "FO-005");
+        assert!(body["error"]["remedy"]
+            .as_str()
+            .is_some_and(|remedy| !remedy.trim().is_empty()));
+        assert_eq!(body["error"]["provider"], "Codex");
+
+        let circuit_open = ProxyError::all_providers_circuit_open();
+        assert_eq!(codex_proxy_error_code(&circuit_open), "FO-004");
+        let body = codex_proxy_error_json("Codex", "gpt-5", "/responses", &circuit_open);
+        assert_eq!(body["error"]["code"], "FO-004");
+        assert!(body["error"]["remedy"]
+            .as_str()
+            .is_some_and(|remedy| !remedy.trim().is_empty()));
+        // 不再是硬编码中文
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(!message.contains("未配置供应商"));
+        assert!(!message.contains("所有供应商已熔断"));
+    }
+
+    /// 非路由错误不应带上 `remedy` 字段。
+    #[test]
+    fn codex_proxy_non_routing_error_has_no_remedy() {
+        let error = ProxyError::ForwardFailed("boom".to_string());
+        let body = codex_proxy_error_json("Codex", "gpt-5", "/responses", &error);
+        assert!(body["error"].get("remedy").is_none());
+        assert_eq!(body["error"]["code"], "cc_switch_forward_failed");
     }
 
     #[test]

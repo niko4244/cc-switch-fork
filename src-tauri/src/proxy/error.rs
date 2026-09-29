@@ -6,6 +6,48 @@ use axum::{
 use serde_json::json;
 use thiserror::Error;
 
+/// 路由失败的结构化元数据（§6.4）。
+///
+/// `code` 是稳定错误码（见 [`super::log_codes::fo`]），与
+/// `active_route::last_error_code` 以及前端 `RouteStatusStrip` 使用同一套取值；
+/// `message` 是客户端可见的简短原因；`remedy` 是可直接照做的下一步。
+///
+/// 这些字段附着在 [`ProxyError::NoProvidersConfigured`] /
+/// [`ProxyError::AllProvidersCircuitOpen`] 变体上，因此任何拿到该错误的调用方
+/// （HTTP 响应、使用量日志、前端）都能直接取用，无需再各自硬编码一句文案。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoutingError {
+    pub code: &'static str,
+    pub message: &'static str,
+    pub remedy: &'static str,
+}
+
+impl RoutingError {
+    /// `FO-005`：未选中供应商，且故障转移队列为空，无从路由。
+    pub const fn no_providers_configured() -> Self {
+        Self {
+            code: super::log_codes::fo::NO_PROVIDERS,
+            message: "No provider is selected and the failover queue is empty, so the request could not be routed.",
+            remedy: "Enable or log in to a provider in the provider list, or add one to the failover queue, then retry.",
+        }
+    }
+
+    /// `FO-004`：候选供应商全部处于熔断冷却中。
+    pub const fn all_providers_circuit_open() -> Self {
+        Self {
+            code: super::log_codes::fo::ALL_CIRCUIT_OPEN,
+            message: "Every candidate provider for this app is circuit-broken and cooling down, so the request could not be routed.",
+            remedy: "Reset the breaker or re-enable a provider, or wait for the cooldown to elapse, then retry.",
+        }
+    }
+}
+
+impl std::fmt::Display for RoutingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ProxyError {
     #[error("服务器已在运行")]
@@ -29,11 +71,11 @@ pub enum ProxyError {
     #[error("无可用的Provider")]
     NoAvailableProvider,
 
-    #[error("所有供应商已熔断，无可用渠道")]
-    AllProvidersCircuitOpen,
+    #[error("{0}")]
+    AllProvidersCircuitOpen(RoutingError),
 
-    #[error("未配置供应商")]
-    NoProvidersConfigured,
+    #[error("{0}")]
+    NoProvidersConfigured(RoutingError),
 
     #[allow(dead_code)]
     #[error("Provider不健康: {0}")]
@@ -74,6 +116,18 @@ pub enum ProxyError {
     #[allow(dead_code)]
     #[error("内部错误: {0}")]
     Internal(String),
+}
+
+impl ProxyError {
+    /// 构造 `FO-005` 路由错误（未选中供应商且故障转移队列为空）。
+    pub fn no_providers_configured() -> Self {
+        Self::NoProvidersConfigured(RoutingError::no_providers_configured())
+    }
+
+    /// 构造 `FO-004` 路由错误（候选供应商全部处于熔断冷却）。
+    pub fn all_providers_circuit_open() -> Self {
+        Self::AllProvidersCircuitOpen(RoutingError::all_providers_circuit_open())
+    }
 }
 
 impl IntoResponse for ProxyError {
@@ -128,10 +182,10 @@ impl IntoResponse for ProxyError {
                     ProxyError::NoAvailableProvider => {
                         (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
                     }
-                    ProxyError::AllProvidersCircuitOpen => {
+                    ProxyError::AllProvidersCircuitOpen(_) => {
                         (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
                     }
-                    ProxyError::NoProvidersConfigured => {
+                    ProxyError::NoProvidersConfigured(_) => {
                         (StatusCode::SERVICE_UNAVAILABLE, self.to_string())
                     }
                     ProxyError::ProviderUnhealthy(_) => {
@@ -159,12 +213,25 @@ impl IntoResponse for ProxyError {
                     ProxyError::UpstreamError { .. } => unreachable!(),
                 };
 
-                let error_body = json!({
-                    "error": {
-                        "message": message,
-                        "type": "proxy_error",
-                    }
-                });
+                // 路由错误额外带上稳定错误码与可操作建议（§6.4），让客户端
+                // 不必去解析本地化文案就能分支处理。
+                let error_body = match &self {
+                    ProxyError::NoProvidersConfigured(info)
+                    | ProxyError::AllProvidersCircuitOpen(info) => json!({
+                        "error": {
+                            "message": message,
+                            "type": "proxy_error",
+                            "code": info.code,
+                            "remedy": info.remedy,
+                        }
+                    }),
+                    _ => json!({
+                        "error": {
+                            "message": message,
+                            "type": "proxy_error",
+                        }
+                    }),
+                };
 
                 (http_status, error_body)
             }
@@ -202,5 +269,62 @@ pub fn categorize_error(error: &reqwest::Error) -> ErrorCategory {
         }
     } else {
         ErrorCategory::Retryable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::to_bytes;
+
+    /// §6.4：客户端应从错误体里直接拿到稳定错误码与可操作建议，而不是去解析文案。
+    #[tokio::test]
+    async fn routing_errors_expose_code_and_remedy_in_the_json_body() {
+        for (error, code) in [
+            (ProxyError::no_providers_configured(), "FO-005"),
+            (ProxyError::all_providers_circuit_open(), "FO-004"),
+        ] {
+            let response = error.into_response();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+            let bytes = to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("error body");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+
+            assert_eq!(body["error"]["code"], code);
+            assert_eq!(body["error"]["type"], "proxy_error");
+            assert!(body["error"]["remedy"]
+                .as_str()
+                .is_some_and(|remedy| !remedy.trim().is_empty()));
+            assert!(body["error"]["message"]
+                .as_str()
+                .is_some_and(|message| !message.trim().is_empty()));
+        }
+    }
+
+    /// 非路由错误不应多出 `code` / `remedy` 字段，免得前端误以为可分支。
+    #[tokio::test]
+    async fn non_routing_errors_keep_the_plain_body() {
+        let response = ProxyError::NoAvailableProvider.into_response();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("error body");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json body");
+
+        assert!(body["error"].get("code").is_none());
+        assert!(body["error"].get("remedy").is_none());
+    }
+
+    #[test]
+    fn routing_error_metadata_matches_the_log_code_constants() {
+        assert_eq!(
+            RoutingError::no_providers_configured().code,
+            crate::proxy::log_codes::fo::NO_PROVIDERS
+        );
+        assert_eq!(
+            RoutingError::all_providers_circuit_open().code,
+            crate::proxy::log_codes::fo::ALL_CIRCUIT_OPEN
+        );
     }
 }

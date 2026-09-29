@@ -136,10 +136,13 @@ impl RequestContext {
             .select_providers(app_type_str)
             .await
             .map_err(|e| match e {
+                // 结构化构造器同时带上 §6.4 的错误码与建议。
                 crate::error::AppError::AllProvidersCircuitOpen => {
-                    ProxyError::AllProvidersCircuitOpen
+                    ProxyError::all_providers_circuit_open()
                 }
-                crate::error::AppError::NoProvidersConfigured => ProxyError::NoProvidersConfigured,
+                crate::error::AppError::NoProvidersConfigured => {
+                    ProxyError::no_providers_configured()
+                }
                 _ => ProxyError::DatabaseError(e.to_string()),
             })?;
 
