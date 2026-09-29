@@ -298,6 +298,88 @@ pub fn codex_provider_upstream_model(provider: &Provider) -> Option<String> {
         })
 }
 
+/// Identify the provider's own `[model_providers.<key>]` block (§6.5).
+///
+/// Returns `(key, declared display name)`. The key is what the provider's config
+/// calls itself (`model_provider`, or the only `model_providers` key when that
+/// field is absent); env-style providers that name no block at all fall back to a
+/// slug of the provider id. The name is only what the block itself declares —
+/// `None` means the caller should use the provider's cc-switch name instead.
+///
+/// Takeover patches a live `config.toml` in place, so this is what makes the
+/// block key match the provider that is actually selected; otherwise the file
+/// keeps naming the previous one.
+pub fn codex_model_provider_identity(provider: &Provider) -> (String, Option<String>) {
+    let doc = provider
+        .settings_config
+        .get("config")
+        .and_then(|value| value.as_str())
+        .and_then(|config| config.parse::<toml_edit::DocumentMut>().ok());
+
+    if let Some(doc) = doc.as_ref() {
+        let declared = doc
+            .get("model_provider")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+
+        // The block's own `name`, only when we know which block to look at.
+        let name_of = |key: &str| -> Option<String> {
+            doc.get("model_providers")
+                .and_then(|item| item.as_table_like())
+                .and_then(|providers| providers.get(key))
+                .and_then(|item| item.as_table_like())
+                .and_then(|table| table.get("name"))
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+        };
+
+        if let Some(declared) = declared {
+            let name = name_of(declared);
+            return (declared.to_string(), name);
+        }
+
+        if let Some(providers) = doc
+            .get("model_providers")
+            .and_then(|item| item.as_table_like())
+            .filter(|providers| providers.len() == 1)
+        {
+            if let Some((key, _)) = providers.iter().next() {
+                let name = name_of(key);
+                return (key.to_string(), name);
+            }
+        }
+    }
+
+    (slugify_codex_model_provider_id(&provider.id), None)
+}
+
+/// 把供应商 id 变成合法的 TOML 裸键（无法识别时用 `custom`）。
+fn slugify_codex_model_provider_id(raw: &str) -> String {
+    let mut slug = String::new();
+    let mut pending_dash = false;
+
+    for ch in raw.trim().chars() {
+        if ch.is_ascii_alphanumeric() {
+            if pending_dash && !slug.is_empty() {
+                slug.push('-');
+            }
+            pending_dash = false;
+            slug.push(ch.to_ascii_lowercase());
+        } else {
+            pending_dash = true;
+        }
+    }
+
+    if slug.is_empty() {
+        "custom".to_string()
+    } else {
+        slug
+    }
+}
+
 fn codex_provider_catalog_model_ids(provider: &Provider) -> HashSet<String> {
     provider
         .settings_config
@@ -859,6 +941,78 @@ mod tests {
             icon_color: None,
             in_failover_queue: false,
         }
+    }
+
+    #[test]
+    fn model_provider_identity_prefers_the_declared_block_key() {
+        let provider = create_provider(json!({
+            "config": r#"model_provider = "brainz"
+
+[model_providers.brainz]
+name = "Brainz Chain"
+base_url = "https://brainz.example/v1"
+
+[model_providers.litellm]
+name = "LiteLLM Gateway"
+"#
+        }));
+
+        let (key, name) = codex_model_provider_identity(&provider);
+        assert_eq!(key, "brainz");
+        assert_eq!(name.as_deref(), Some("Brainz Chain"));
+    }
+
+    #[test]
+    fn model_provider_identity_uses_the_only_block_when_model_provider_is_absent() {
+        let provider = create_provider(json!({
+            "config": r#"[model_providers.custom]
+name = "Custom Endpoint"
+base_url = "https://custom.example/v1"
+"#
+        }));
+
+        let (key, name) = codex_model_provider_identity(&provider);
+        assert_eq!(key, "custom");
+        assert_eq!(name.as_deref(), Some("Custom Endpoint"));
+    }
+
+    #[test]
+    fn model_provider_identity_does_not_guess_between_several_blocks() {
+        // Two blocks and no `model_provider`: picking either would be a guess,
+        // and the wrong guess routes the live file at the wrong upstream.
+        let mut provider = create_provider(json!({
+            "config": r#"[model_providers.alpha]
+name = "Alpha"
+
+[model_providers.beta]
+name = "Beta"
+"#
+        }));
+        provider.id = "vendor-gamma".to_string();
+
+        let (key, name) = codex_model_provider_identity(&provider);
+        assert_eq!(key, "vendor-gamma");
+        assert!(name.is_none(), "no declared name to trust");
+    }
+
+    #[test]
+    fn model_provider_identity_slugifies_an_env_style_provider_id() {
+        let mut provider = create_provider(json!({}));
+        provider.id = "My.Weird Provider!".to_string();
+
+        let (key, name) = codex_model_provider_identity(&provider);
+        assert_eq!(key, "my-weird-provider", "must stay a valid TOML bare key");
+        assert!(name.is_none());
+    }
+
+    #[test]
+    fn model_provider_identity_falls_back_when_the_config_is_not_toml() {
+        let mut provider = create_provider(json!({ "config": "not = toml [" }));
+        provider.id = "broken-provider".to_string();
+
+        let (key, name) = codex_model_provider_identity(&provider);
+        assert_eq!(key, "broken-provider");
+        assert!(name.is_none());
     }
 
     #[test]

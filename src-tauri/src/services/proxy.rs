@@ -2742,7 +2742,25 @@ impl ProxyService {
                 .map_err(|e| format!("生成 Codex 官方接管配置失败: {e}"));
         }
 
-        let updated = crate::codex_config::update_codex_toml_field(toml_str, "base_url", proxy_url)
+        // §6.5: this patches an existing live config in place, so without
+        // repointing the block first the active `[model_providers.<key>]` keeps
+        // the previous provider's key and name. A live file that names one
+        // provider while routing to another is the recurring time sink.
+        let pointed = match provider {
+            Some(provider) => {
+                let (provider_key, declared_name) =
+                    crate::proxy::providers::codex_model_provider_identity(provider);
+                crate::codex_config::point_codex_active_model_provider(
+                    toml_str,
+                    &provider_key,
+                    Some(declared_name.as_deref().unwrap_or(&provider.name)),
+                )
+                .map_err(|e| format!("重写 Codex model_providers 区块失败: {e}"))?
+            }
+            None => toml_str.to_string(),
+        };
+
+        let updated = crate::codex_config::update_codex_toml_field(&pointed, "base_url", proxy_url)
             .map_err(|e| format!("更新 Codex 代理地址失败: {e}"))?;
         let mut updated =
             crate::codex_config::update_codex_toml_field(&updated, "wire_api", "responses")
@@ -5139,6 +5157,126 @@ wire_api = "responses"
                 .and_then(|v| v.get("base_url"))
                 .and_then(|v| v.as_str()),
             Some(proxy_url)
+        );
+    }
+
+    /// §6.5：接管时输入是 `~/.codex/config.toml` 本身，所以区块名会留在上一个
+    /// 供应商身上——文件里写着 litellm，实际路由到 brainz。
+    #[test]
+    fn apply_codex_proxy_toml_config_repoints_the_stale_live_block() {
+        let live_config = r#"
+model_provider = "litellm"
+model = "gpt-5.1-codex"
+disable_response_storage = true
+
+[model_providers.litellm]
+name = "LiteLLM Gateway"
+base_url = "https://litellm.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "PROXY_MANAGED"
+"#;
+        let mut provider = Provider::with_id(
+            "brainz-chain".to_string(),
+            "Brainz Chain".to_string(),
+            json!({
+                "config": r#"model_provider = "brainz"
+model = "brainz-chain"
+model_reasoning_effort = "high"
+
+[model_providers.brainz]
+name = "Brainz Chain"
+base_url = "https://brainz.example/v1"
+wire_api = "responses"
+"#
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+
+        let proxy_url = "http://127.0.0.1:5000/v1";
+        let output = ProxyService::apply_codex_proxy_toml_config_for_provider(
+            live_config,
+            proxy_url,
+            Some(&provider),
+        )
+        .expect("repoint the stale live config");
+        let parsed: toml::Value =
+            toml::from_str(&output).expect("updated config should be valid TOML");
+
+        assert_eq!(
+            parsed.get("model_provider").and_then(|v| v.as_str()),
+            Some("brainz"),
+            "the live file must name the provider it actually routes to"
+        );
+
+        let block = &parsed["model_providers"]["brainz"];
+        assert_eq!(block["name"].as_str(), Some("Brainz Chain"));
+        assert_eq!(block["base_url"].as_str(), Some(proxy_url));
+        assert_eq!(block["wire_api"].as_str(), Some("responses"));
+        assert_eq!(
+            block["experimental_bearer_token"].as_str(),
+            Some("PROXY_MANAGED"),
+            "the block is re-keyed in place, so its own fields come along"
+        );
+        assert!(
+            parsed["model_providers"].get("litellm").is_none(),
+            "the stale block must not survive as a second provider"
+        );
+        assert_eq!(
+            parsed["model"].as_str(),
+            Some("brainz-chain"),
+            "the model must follow the provider, as before"
+        );
+        assert_eq!(
+            parsed
+                .get("disable_response_storage")
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "unrelated live settings must survive the rewrite"
+        );
+    }
+
+    #[test]
+    fn apply_codex_proxy_toml_config_keeps_an_already_correct_block_untouched() {
+        // The live file already names this provider: re-keying it must not
+        // rename the block to a slug of the provider id and split it in two.
+        let live_config = r#"model_provider = "brainz"
+model = "gpt-5.1-codex"
+
+[model_providers.brainz]
+name = "Brainz Chain"
+base_url = "http://127.0.0.1:5000/v1"
+wire_api = "responses"
+"#;
+        let provider = Provider::with_id(
+            "brainz-chain".to_string(),
+            "Brainz Chain".to_string(),
+            json!({ "config": live_config }),
+            None,
+        );
+
+        let output = ProxyService::apply_codex_proxy_toml_config_for_provider(
+            live_config,
+            "http://127.0.0.1:5000/v1",
+            Some(&provider),
+        )
+        .expect("apply proxy config");
+        let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+
+        assert_eq!(
+            parsed.get("model_provider").and_then(|v| v.as_str()),
+            Some("brainz")
+        );
+        assert_eq!(
+            parsed["model_providers"].as_table().map(|t| t.len()),
+            Some(1)
+        );
+        assert!(
+            parsed["model_providers"].get("brainz-chain").is_none(),
+            "must not invent a second block for the same provider"
         );
     }
 

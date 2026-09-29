@@ -1772,6 +1772,112 @@ pub fn apply_codex_official_proxy_route(
     Ok(doc.to_string())
 }
 
+/// Point the live config's `model_provider` — and the block it names — at the
+/// provider that is actually selected.
+///
+/// Takeover patches an existing live `config.toml` in place, so before this the
+/// active `[model_providers.<key>]` block kept the *previous* provider's key and
+/// display name: the file named one provider and routed to another, which is a
+/// recurring time sink (docs/DESIGN-routing-mode.md §6.5).
+///
+/// The active block is re-keyed rather than rebuilt, so its own fields
+/// (`env_key`, `experimental_bearer_token`, …) come along. Blocks belonging to
+/// other providers are never deleted — that is where user bearer tokens live,
+/// and they are exactly what a later switch back to that provider needs.
+pub fn point_codex_active_model_provider(
+    config_text: &str,
+    provider_id: &str,
+    provider_name: Option<&str>,
+) -> Result<String, AppError> {
+    let provider_id = provider_id.trim();
+    if provider_id.is_empty() {
+        return Ok(config_text.to_string());
+    }
+    let provider_name = provider_name.map(str::trim).filter(|name| !name.is_empty());
+
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    let current = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::to_string);
+
+    // Nothing to do: rewriting anyway would churn the live file on every sync.
+    if current.as_deref() == Some(provider_id) {
+        let name_already_matches = provider_name.is_none_or(|expected| {
+            doc.get("model_providers")
+                .and_then(|item| item.as_table_like())
+                .and_then(|providers| providers.get(provider_id))
+                .and_then(|item| item.as_table_like())
+                .and_then(|table| table.get("name"))
+                .and_then(|item| item.as_str())
+                == Some(expected)
+        });
+        if name_already_matches {
+            return Ok(config_text.to_string());
+        }
+    }
+
+    if doc
+        .get("model_providers")
+        .is_none_or(|item| item.as_table_like().is_none())
+    {
+        if doc
+            .get("model_providers")
+            .is_some_and(|item| !item.is_none())
+        {
+            log::warn!("config.toml 的 model_providers 不是表，已重置为空表");
+        }
+        doc["model_providers"] = toml_edit::table();
+    }
+
+    let providers = doc
+        .get_mut("model_providers")
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or_else(|| {
+            AppError::Message(
+                "Invalid Codex config.toml: model_providers must be a table".to_string(),
+            )
+        })?;
+
+    // Re-key the block that was in use, unless the provider already has one of
+    // its own — then that block is authoritative and the stale key stays put.
+    if !providers.contains_key(provider_id) {
+        if let Some(previous_key) = current.as_deref() {
+            if previous_key != provider_id {
+                if let Some(block) = providers.remove(previous_key) {
+                    if block.as_table_like().is_some() {
+                        providers.insert(provider_id, block);
+                    } else {
+                        // `model_providers.<key> = "str"` is not a block: keep the
+                        // value where it is and start a fresh table.
+                        providers.insert(previous_key, block);
+                        providers.insert(provider_id, toml_edit::table());
+                    }
+                }
+            }
+        }
+    }
+
+    if !providers.contains_key(provider_id) {
+        providers.insert(provider_id, toml_edit::table());
+    }
+
+    if let Some(name) = provider_name {
+        if let Some(table) = providers
+            .get_mut(provider_id)
+            .and_then(toml_edit::Item::as_table_like_mut)
+        {
+            table.insert("name", toml_edit::value(name));
+        }
+    }
+
+    doc["model_provider"] = toml_edit::value(provider_id);
+    Ok(doc.to_string())
+}
+
 /// Whether a live Codex config is the official route projected by CC Switch.
 pub fn codex_config_has_official_proxy_route(config_text: &str) -> bool {
     if !config_text.contains(CC_SWITCH_CODEX_OFFICIAL_PROXY_PROVIDER_ID) {
@@ -2262,6 +2368,155 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// §6.5 的现场：live 文件把 `model` 改成了新供应商的模型，区块名却还是上一个供应商。
+    const STALE_LIVE_CONFIG: &str = r#"model_provider = "litellm"
+model = "brainz-chain"
+model_reasoning_effort = "medium"
+
+[model_providers.litellm]
+name = "LiteLLM Gateway"
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+experimental_bearer_token = "PROXY_MANAGED"
+"#;
+
+    #[test]
+    fn pointing_the_active_provider_renames_the_stale_block() {
+        let pointed =
+            point_codex_active_model_provider(STALE_LIVE_CONFIG, "brainz", Some("Brainz Chain"))
+                .expect("repoint");
+
+        let doc = pointed.parse::<DocumentMut>().expect("parse");
+        assert_eq!(
+            doc.get("model_provider").and_then(|item| item.as_str()),
+            Some("brainz"),
+            "model_provider must name the selected provider"
+        );
+
+        let block = &doc["model_providers"]["brainz"];
+        assert_eq!(
+            block.get("name").and_then(|item| item.as_str()),
+            Some("Brainz Chain"),
+            "the block must stop claiming the previous provider's name"
+        );
+        // The block is re-keyed, not rebuilt: its own fields come along.
+        assert_eq!(
+            block
+                .get("experimental_bearer_token")
+                .and_then(|item| item.as_str()),
+            Some("PROXY_MANAGED")
+        );
+        assert_eq!(
+            block.get("wire_api").and_then(|item| item.as_str()),
+            Some("responses")
+        );
+        assert!(
+            doc["model_providers"].get("litellm").is_none(),
+            "the stale key must not be left naming a second provider"
+        );
+    }
+
+    #[test]
+    fn pointing_the_active_provider_keeps_other_providers_blocks() {
+        // Those blocks hold real bearer tokens; a later switch back needs them.
+        let with_other = format!(
+            "{STALE_LIVE_CONFIG}\n[model_providers.deepseek]\nname = \"DeepSeek\"\nbase_url = \"https://api.deepseek.com/v1\"\nexperimental_bearer_token = \"sk-real\"\n"
+        );
+
+        let pointed =
+            point_codex_active_model_provider(&with_other, "brainz", None).expect("repoint");
+        let doc = pointed.parse::<DocumentMut>().expect("parse");
+
+        assert_eq!(
+            doc["model_providers"]["deepseek"]
+                .get("experimental_bearer_token")
+                .and_then(|item| item.as_str()),
+            Some("sk-real")
+        );
+        assert!(doc["model_providers"].get("brainz").is_some());
+        assert!(doc["model_providers"].get("litellm").is_none());
+    }
+
+    #[test]
+    fn an_existing_target_block_wins_over_the_stale_active_one() {
+        let both = r#"model_provider = "litellm"
+
+[model_providers.litellm]
+name = "LiteLLM Gateway"
+base_url = "http://127.0.0.1:15721/v1"
+
+[model_providers.brainz]
+name = "Brainz Chain"
+base_url = "http://127.0.0.1:3200/v1"
+"#;
+
+        let pointed = point_codex_active_model_provider(both, "brainz", Some("Brainz Chain"))
+            .expect("repoint");
+        let doc = pointed.parse::<DocumentMut>().expect("parse");
+
+        assert_eq!(
+            doc.get("model_provider").and_then(|item| item.as_str()),
+            Some("brainz")
+        );
+        // The provider's own block is authoritative; the stale one is left alone
+        // rather than deleted, because it belongs to another provider.
+        assert_eq!(
+            doc["model_providers"]["brainz"]
+                .get("base_url")
+                .and_then(|item| item.as_str()),
+            Some("http://127.0.0.1:3200/v1")
+        );
+        assert!(doc["model_providers"].get("litellm").is_some());
+    }
+
+    #[test]
+    fn pointing_an_already_current_provider_changes_nothing() {
+        let current = r#"model_provider = "brainz"
+
+[model_providers.brainz]
+name = "Brainz Chain"
+base_url = "http://127.0.0.1:15721/v1"
+"#;
+
+        assert_eq!(
+            point_codex_active_model_provider(current, "brainz", Some("Brainz Chain"))
+                .expect("repoint"),
+            current,
+            "an unchanged live file must not be rewritten on every sync"
+        );
+    }
+
+    #[test]
+    fn pointing_creates_the_block_when_the_live_config_has_none() {
+        let bare = "model = \"gpt-5.6-terra\"\n";
+
+        let pointed = point_codex_active_model_provider(bare, "brainz", Some("Brainz Chain"))
+            .expect("repoint");
+        let doc = pointed.parse::<DocumentMut>().expect("parse");
+
+        assert_eq!(
+            doc.get("model_provider").and_then(|item| item.as_str()),
+            Some("brainz")
+        );
+        assert_eq!(
+            doc["model_providers"]["brainz"]
+                .get("name")
+                .and_then(|item| item.as_str()),
+            Some("Brainz Chain")
+        );
+        // The caller still patches the proxy wiring afterwards.
+        let wired =
+            update_codex_toml_field(&pointed, "base_url", "http://127.0.0.1:15721/v1").unwrap();
+        let doc = wired.parse::<DocumentMut>().expect("parse");
+        assert_eq!(
+            doc["model_providers"]["brainz"]
+                .get("base_url")
+                .and_then(|item| item.as_str()),
+            Some("http://127.0.0.1:15721/v1"),
+            "the proxy address must land in the renamed block"
+        );
+    }
 
     #[test]
     fn catalog_tool_profile_from_api_format() {
