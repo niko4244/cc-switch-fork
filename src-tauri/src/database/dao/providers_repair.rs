@@ -936,4 +936,253 @@ mod tests {
             Some("seed-config")
         );
     }
+
+    /// 把一份**真实**的 `cc-switch.db` 副本从 v16 升到 v17，走完整启动路径。
+    ///
+    /// 与前面的单测不同，这里的输入不是构造出来的内存库，而是用户线上库的副本被
+    /// 还原成"修复前"的形状（每个 app 重复官方行 + 过期的故障转移队列），迁移由
+    /// `Database::init`（= 应用启动时的同一条链）执行，因此能证明线上数据会被正确
+    /// 修复，而不是只证明测试夹具自洽。
+    ///
+    /// 默认 `#[ignore]`：需要外部夹具。
+    ///
+    /// ```text
+    /// set CC_SWITCH_REPAIR_FIXTURE_DIR=C:\tmp\cc-migrate-test\fixture-source
+    /// set CC_SWITCH_REPAIR_OUTPUT_DIR=C:\tmp\cc-migrate-test\migrated
+    /// cargo test --lib migration_upgrades_a_real_database_copy -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[serial]
+    #[ignore = "needs CC_SWITCH_REPAIR_FIXTURE_DIR and CC_SWITCH_REPAIR_OUTPUT_DIR"]
+    fn migration_upgrades_a_real_database_copy() {
+        let fixture = PathBuf::from(
+            env::var("CC_SWITCH_REPAIR_FIXTURE_DIR")
+                .expect("CC_SWITCH_REPAIR_FIXTURE_DIR must point at a config dir"),
+        );
+        let output = PathBuf::from(
+            env::var("CC_SWITCH_REPAIR_OUTPUT_DIR")
+                .expect("CC_SWITCH_REPAIR_OUTPUT_DIR must point at a writable dir"),
+        );
+        let fixture_db = fixture.join(".cc-switch").join("cc-switch.db");
+        assert!(fixture_db.exists(), "fixture db missing: {}", fixture_db.display());
+
+        // 每次都从夹具重新开始，保证可重复运行。
+        if output.exists() {
+            std::fs::remove_dir_all(&output).expect("clear output dir");
+        }
+        copy_tree(&fixture, &output);
+
+        let db_path = output.join(".cc-switch").join("cc-switch.db");
+        let before_version = raw_query_i64(&db_path, "PRAGMA user_version");
+        assert_eq!(before_version, 16, "fixture must start at v16");
+
+        let original_home = env::var("HOME").ok();
+        let original_userprofile = env::var("USERPROFILE").ok();
+        let original_test_home = env::var("CC_SWITCH_TEST_HOME").ok();
+        env::set_var("HOME", &output);
+        env::set_var("USERPROFILE", &output);
+        env::set_var("CC_SWITCH_TEST_HOME", &output);
+        crate::settings::reload_settings().expect("reload settings");
+
+        // 生产启动路径：建表 + 迁移链（v16 -> v17 就在其中）。
+        drop(Database::init().expect("migrate the real database copy"));
+
+        let conn = Connection::open(&db_path).expect("reopen migrated db");
+        let report = |label: &str| {
+            println!("\n=== {label} ===");
+            for (app, count) in query_pairs(
+                &conn,
+                "SELECT app_type, COUNT(*) FROM providers WHERE category = 'official' \
+                 GROUP BY app_type ORDER BY app_type",
+            ) {
+                println!("  official rows {app:<16} {count}");
+            }
+            for (app, queued) in query_pairs(
+                &conn,
+                "SELECT app_type, COUNT(*) FROM providers WHERE in_failover_queue = 1 \
+                 GROUP BY app_type ORDER BY app_type",
+            ) {
+                println!("  queued rows   {app:<16} {queued}");
+            }
+        };
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("user_version");
+        assert_eq!(version, 17, "migration must advance the schema to v17");
+        report("AFTER");
+
+        // codex：重复官方行合并，种子行保留 id 并接过更新的登录态。
+        let codex_official = official_ids(&conn, "codex");
+        assert_eq!(codex_official, vec!["codex-official".to_string()]);
+        let codex_auth = official_settings(&conn, "codex", "codex-official");
+        assert_eq!(
+            codex_auth
+                .pointer("/auth/tokens/access_token")
+                .and_then(Value::as_str),
+            Some("FIXTURE-CODEX-FRESH-LOGIN"),
+            "the freshest login must move onto the surviving seed row"
+        );
+        assert_eq!(
+            codex_auth
+                .pointer("/auth/last_refresh")
+                .and_then(Value::as_str),
+            Some("2026-09-28T18:00:00.000000000Z")
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT is_current FROM providers WHERE app_type='codex' AND id='codex-official'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("codex-official is_current"),
+            1,
+            "the removed row held is_current, so the survivor must adopt it"
+        );
+
+        // codex 故障转移是关的：整个队列（含第三方行）必须被清空。
+        assert_eq!(
+            queued_count(&conn, "codex"),
+            0,
+            "auto_failover_enabled = 0 must clear the whole codex queue"
+        );
+
+        // gemini：同样合并，但故障转移开着，队列必须原样保留。
+        assert_eq!(official_ids(&conn, "gemini"), vec!["gemini-official".to_string()]);
+        let gemini_auth = official_settings(&conn, "gemini", "gemini-official");
+        assert_eq!(
+            gemini_auth.pointer("/auth/apiKey").and_then(Value::as_str),
+            Some("FIXTURE-GEMINI-FRESH-LOGIN")
+        );
+        assert_eq!(queued_count(&conn, "gemini"), 1, "failover-on queue must survive");
+
+        // claude 本来就没有重复官方行：一行都不能少，队列原样保留。
+        assert_eq!(official_ids(&conn, "claude"), vec!["claude-official".to_string()]);
+        assert_eq!(queued_count(&conn, "claude"), 12);
+        assert_eq!(official_ids(&conn, "claude-desktop"), vec!["claude-desktop-official".to_string()]);
+        assert_eq!(official_ids(&conn, "grokbuild"), vec!["grokbuild-official".to_string()]);
+
+        // 被删掉的行必须先落盘归档，绝不静默丢弃登录态。
+        let archive = find_archive(&output);
+        let archived = std::fs::read_to_string(&archive).expect("read archive");
+        let archived: Value = serde_json::from_str(&archived).expect("parse archive");
+        let archived_ids: Vec<String> = archived
+            .get("providers")
+            .and_then(Value::as_array)
+            .expect("archive providers")
+            .iter()
+            .filter_map(|row| row.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect();
+        println!("\narchive: {}", archive.display());
+        println!("archived ids: {archived_ids:?}");
+        assert!(archived_ids.contains(&"codex-official-imported".to_string()));
+        assert!(archived_ids.contains(&"gemini-official-imported".to_string()));
+
+        // 幂等：再跑一次启动路径不得再改动任何东西。
+        let before = snapshot_counts(&conn);
+        drop(conn);
+        drop(Database::init().expect("second startup must succeed"));
+        let conn = Connection::open(&db_path).expect("reopen migrated db");
+        assert_eq!(snapshot_counts(&conn), before, "repair must be idempotent");
+        drop(conn);
+
+        match original_home {
+            Some(value) => env::set_var("HOME", value),
+            None => env::remove_var("HOME"),
+        }
+        match original_userprofile {
+            Some(value) => env::set_var("USERPROFILE", value),
+            None => env::remove_var("USERPROFILE"),
+        }
+        match original_test_home {
+            Some(value) => env::set_var("CC_SWITCH_TEST_HOME", value),
+            None => env::remove_var("CC_SWITCH_TEST_HOME"),
+        }
+    }
+
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).expect("create dir");
+        for entry in std::fs::read_dir(from).expect("read dir") {
+            let entry = entry.expect("dir entry");
+            let target = to.join(entry.file_name());
+            if entry.file_type().expect("file type").is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).expect("copy file");
+            }
+        }
+    }
+
+    fn raw_query_i64(path: &std::path::Path, sql: &str) -> i64 {
+        Connection::open(path)
+            .expect("open db")
+            .query_row(sql, [], |row| row.get(0))
+            .expect("query")
+    }
+
+    fn query_pairs(conn: &Connection, sql: &str) -> Vec<(String, i64)> {
+        let mut stmt = conn.prepare(sql).expect("prepare");
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        rows
+    }
+
+    fn official_ids(conn: &Connection, app_type: &str) -> Vec<String> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM providers WHERE app_type = ?1 AND category = 'official' ORDER BY id",
+            )
+            .expect("prepare");
+        stmt.query_map(params![app_type], |row| row.get(0))
+            .expect("query")
+            .collect::<Result<Vec<String>, _>>()
+            .expect("collect")
+    }
+
+    fn official_settings(conn: &Connection, app_type: &str, id: &str) -> Value {
+        let raw: String = conn
+            .query_row(
+                "SELECT settings_config FROM providers WHERE app_type = ?1 AND id = ?2",
+                params![app_type, id],
+                |row| row.get(0),
+            )
+            .expect("settings_config");
+        serde_json::from_str(&raw).expect("parse settings_config")
+    }
+
+    fn queued_count(conn: &Connection, app_type: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM providers WHERE app_type = ?1 AND in_failover_queue = 1",
+            params![app_type],
+            |row| row.get(0),
+        )
+        .expect("queued count")
+    }
+
+    /// 迁移后库内容的稳定指纹，用于幂等性断言。
+    fn snapshot_counts(conn: &Connection) -> Vec<(String, i64)> {
+        query_pairs(
+            conn,
+            "SELECT app_type || ':' || COALESCE(category, '') || ':' || is_current || ':' \
+             || in_failover_queue, COUNT(*) FROM providers GROUP BY 1 ORDER BY 1",
+        )
+    }
+
+    fn find_archive(root: &std::path::Path) -> PathBuf {
+        let dir = root
+            .join(".cc-switch")
+            .join("backups")
+            .join(OFFICIAL_MERGE_ARCHIVE_DIR);
+        let mut files: Vec<PathBuf> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("read archive dir") {
+            let entry = entry.expect("archive entry");
+            files.push(entry.path().join("providers.json"));
+        }
+        files.sort();
+        files.pop().expect("an archive must exist")
+    }
 }
