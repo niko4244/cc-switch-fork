@@ -2481,6 +2481,19 @@ impl Database {
             ("codex-mini", "Codex Mini", "0.75", "3", "0.025", "0"),
             ("gpt-5-mini", "GPT-5 Mini", "0.25", "2", "0.025", "0"),
             ("gpt-5-nano", "GPT-5 Nano", "0.05", "0.40", "0.005", "0"),
+            // 本 fork 接入的本地聚合链（Brainz Chain）。它只在自维护的免费档上游
+            // 之间级联（freellmapi → kilo → … → ollama），自身不产生费用，因此显式
+            // 记 0：留空的话，「本来就免费」的 0 与「查不到价」的 0 无法区分，每次
+            // 链式请求还会刷 USG-002。上游回显真实模型名（付费或免费）时照常按该行
+            // 计价，链只在无法归因到具体上游时才用到这一行。
+            (
+                "brainz-chain",
+                "Brainz Chain (free cascade)",
+                "0",
+                "0",
+                "0",
+                "0",
+            ),
         ];
 
         let mut stmt = conn

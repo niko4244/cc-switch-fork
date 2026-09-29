@@ -1924,6 +1924,21 @@ impl Database {
         let base_total = input_cost + output_cost + cache_read_cost + cache_creation_cost;
         let total_cost = base_total * multiplier;
 
+        // 已确认免费（`:free`）的模型解析出的是显式 0 价，重算结果与账面已有的 0
+        // 完全一致。把 0 写成 0 不是一次回填：计进 updated 只会让启动日志虚报条数，
+        // 也会每次启动无谓重写这些行。数值没变就不写。
+        let unchanged_component = |next: rust_decimal::Decimal, current: &str| {
+            next == rust_decimal::Decimal::from_str(current).unwrap_or(rust_decimal::Decimal::ZERO)
+        };
+        if total_cost == existing_cost
+            && unchanged_component(input_cost, &log.input_cost_usd)
+            && unchanged_component(output_cost, &log.output_cost_usd)
+            && unchanged_component(cache_read_cost, &log.cache_read_cost_usd)
+            && unchanged_component(cache_creation_cost, &log.cache_creation_cost_usd)
+        {
+            return Ok(false);
+        }
+
         log.input_cost_usd = format!("{input_cost:.6}");
         log.output_cost_usd = format!("{output_cost:.6}");
         log.cache_read_cost_usd = format!("{cache_read_cost:.6}");
@@ -2036,6 +2051,22 @@ pub(crate) fn find_model_pricing_row(
     conn: &Connection,
     model_id: &str,
 ) -> Result<Option<(String, String, String, String)>, AppError> {
+    // 上游明示免费（`...:free`）→ 显式零价。
+    //
+    // 必须在归一化之前就地判定：`clean_model_id_for_pricing` 会把 `:free` 一并
+    // 剥掉，免费别名于是可能命中付费价表行（如 `stepfun/step-3.7-flash:free` 命中
+    // `step-3.7-flash` 的列表价），既不是真实成本，也把免费档算成了付费。查不到价
+    // 时的省略路径同样不对：那会写下一个来源不明的 0 并刷 USG-002。
+    if is_confirmed_free_model(model_id) {
+        log::debug!("[USG-005] 上游明示免费，显式记 0: {model_id}");
+        return Ok(Some((
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+            "0".to_string(),
+        )));
+    }
+
     let candidates = model_pricing_candidates(model_id);
     if candidates.is_empty() {
         return Ok(None);
@@ -2085,6 +2116,24 @@ fn log_pricing_scope_matches(log: &RequestLogDetail, target_candidates: &[String
 pub(crate) fn is_placeholder_pricing_model(model_id: &str) -> bool {
     let normalized = model_id.trim().to_ascii_lowercase();
     normalized.is_empty() || matches!(normalized.as_str(), "unknown" | "null" | "none")
+}
+
+/// 上游明示的免费档后缀（OpenRouter 风格 `:free`）。
+///
+/// 这是上游自己的声明而非我们的推断，因此按「已确认免费」处理：显式记 0，而不是
+/// 落进「查不到价 → 0 + USG-002」的省略路径——两者在账面上必须能区分开。
+///
+/// 只在归一化之前、拿原始模型名判定才有意义：`clean_model_id_for_pricing` 会把
+/// `:free` 当作变体后缀剥掉，剥掉之后就再也看不出这是免费档了。
+pub(crate) const FREE_MODEL_SUFFIX: &str = ":free";
+
+pub(crate) fn is_confirmed_free_model(model_id: &str) -> bool {
+    let normalized = model_id.trim().to_ascii_lowercase();
+    match normalized.strip_suffix(FREE_MODEL_SUFFIX) {
+        // `:free` 前面必须还有一个真的模型名，否则只是一个看起来像标记的占位符。
+        Some(stem) => !stem.is_empty() && !is_placeholder_pricing_model(stem),
+        None => false,
+    }
 }
 
 /// 聚合网关回显的「不是模型名的模型名」。
@@ -2992,14 +3041,16 @@ mod tests {
 
         {
             let conn = lock_conn!(db.conn);
-            // 代理日志按上游原文落库：带路由前缀和 :free 后缀的别名形式。
+            // 代理日志按上游原文落库：带路由前缀和变体后缀的别名形式。
             // 精准回填的筛选必须归一化后匹配，否则这类行要等全量回填才更新。
+            // （后缀用 :exa 而不是 :free：后者是上游的「已确认免费」声明，
+            // 语义不同，另有测试覆盖。）
             insert_usage_log(
                 &conn,
                 "openrouter-alias-zero-cost",
                 "claude",
                 "provider-1",
-                "openrouter/moonshot/kimi-k2-novel:free",
+                "openrouter/moonshot/kimi-k2-novel:exa",
                 "proxy",
                 1000,
                 1_000_000,
@@ -3037,6 +3088,64 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(total_cost, "0.600000");
+
+        Ok(())
+    }
+
+    /// 已确认免费（`:free`）的行不是「待补价」：补上同名前缀的付费价表行也不得
+    /// 回头把它记成付费。免费是上游的声明，历史行同样按显式 0 归属。
+    #[test]
+    fn confirmed_free_rows_are_never_backfilled_into_a_paid_row() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "free-alias-row",
+                "claude",
+                "provider-1",
+                "stepfun/step-3.7-flash:free",
+                "proxy",
+                1000,
+                1_000_000,
+                0,
+                0,
+                0,
+                200,
+                "0",
+            )?;
+        }
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT OR REPLACE INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
+                 VALUES ('step-3.7-flash', 'Step 3.7 Flash', '10', '10')",
+                [],
+            )?;
+        }
+
+        // 同名前缀的付费行不会把免费行的成本补出来：两种回填口径都不动它。
+        assert_eq!(
+            db.backfill_missing_usage_costs_for_model("step-3.7-flash")?,
+            0
+        );
+        assert_eq!(db.backfill_missing_usage_costs()?, 0);
+
+        let conn = lock_conn!(db.conn);
+        let total_cost: String = conn.query_row(
+            "SELECT total_cost_usd
+             FROM proxy_request_logs WHERE request_id = 'free-alias-row'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(
+            rust_decimal::Decimal::from_str(&total_cost)
+                .unwrap()
+                .is_zero(),
+            "免费上游的行必须保持显式 0，不能被同名的付费行回填成付费，实际: {total_cost}"
+        );
 
         Ok(())
     }
@@ -4217,6 +4326,91 @@ mod tests {
         let (input, output, ..) = row.unwrap();
         assert_eq!(input, "0.84");
         assert_eq!(output, "4.2");
+
+        Ok(())
+    }
+
+    #[test]
+    fn confirmed_free_suffix_is_recognized_before_normalization() {
+        assert!(is_confirmed_free_model("stepfun/step-3.7-flash:free"));
+        assert!(is_confirmed_free_model(
+            "openrouter/anthropic/claude-sonnet-4.5:free"
+        ));
+        assert!(is_confirmed_free_model("  kimi-k2-novel:free  "));
+        assert!(is_confirmed_free_model("some-model:FREE"));
+
+        // 标记前面必须还有一个真的模型名。
+        assert!(!is_confirmed_free_model(":free"));
+        assert!(!is_confirmed_free_model("unknown:free"));
+        // 没有标记、或标记是别的变体后缀时，不得当成免费。
+        assert!(!is_confirmed_free_model("step-3.7-flash"));
+        assert!(!is_confirmed_free_model("kimi-k2-0905:exa"));
+    }
+
+    #[test]
+    fn confirmed_free_model_prices_at_explicit_zero_instead_of_the_paid_row() -> Result<(), AppError>
+    {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+
+        // 同名付费行：`:free` 归一化后本会落到它身上，把免费档算成付费。
+        conn.execute(
+            "INSERT OR REPLACE INTO model_pricing (
+                model_id, display_name, input_cost_per_million, output_cost_per_million,
+                cache_read_cost_per_million, cache_creation_cost_per_million
+            ) VALUES ('step-3.7-flash', 'Step 3.7 Flash', '0.1', '0.2', '0', '0')",
+            [],
+        )?;
+
+        let (input, output, cache_read, cache_creation) =
+            find_model_pricing_row(&conn, "stepfun/step-3.7-flash:free")?
+                .expect("已确认免费的模型必须解析出显式 0 价，而不是查不到价（那才会静默记 0）");
+        assert_eq!(
+            (
+                input.as_str(),
+                output.as_str(),
+                cache_read.as_str(),
+                cache_creation.as_str()
+            ),
+            ("0", "0", "0", "0"),
+            "上游明示免费时必须记 0，不能命中同名的付费行"
+        );
+
+        // 同一个模型的付费变体不受影响。
+        let (paid_input, ..) =
+            find_model_pricing_row(&conn, "step-3.7-flash")?.expect("付费变体仍按自身定价行计价");
+        assert_eq!(paid_input, "0.1");
+
+        Ok(())
+    }
+
+    #[test]
+    fn brainz_chain_is_seeded_as_an_explicit_free_row() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+
+        let (input, output, cache_read, cache_creation) =
+            find_model_pricing_row(&conn, "brainz-chain")?
+                .expect("brainz-chain 必须在默认定价种子里，链式请求才有明确归属的 0 而不是省略");
+        assert_eq!(
+            (
+                input.as_str(),
+                output.as_str(),
+                cache_read.as_str(),
+                cache_creation.as_str()
+            ),
+            ("0", "0", "0", "0")
+        );
+
+        let display_name: String = conn.query_row(
+            "SELECT display_name FROM model_pricing WHERE model_id = 'brainz-chain'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(
+            display_name.to_ascii_lowercase().contains("free"),
+            "显示名要说清这是免费级联，实际: {display_name}"
+        );
 
         Ok(())
     }

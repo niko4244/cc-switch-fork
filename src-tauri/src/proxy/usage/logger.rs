@@ -819,9 +819,11 @@ mod tests {
     }
 
     fn seed_brainz_pricing(db: &Database) -> Result<(), AppError> {
+        // REPLACE，不是 INSERT：`brainz-chain` 现在也由默认定价种子提供（显式 0 的
+        // 免费级联），测试要的是自己那个能算出非零价格的价表行。
         let conn = crate::database::lock_conn!(db.conn);
         conn.execute(
-            "INSERT INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
+            "INSERT OR REPLACE INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
              VALUES ('brainz-chain', 'Brainz Chain', '10', '10')",
             [],
         )?;
@@ -910,6 +912,90 @@ mod tests {
         assert_eq!(
             Decimal::from_str(&cost).unwrap(),
             Decimal::from_str("0").unwrap()
+        );
+        Ok(())
+    }
+
+    /// 链无法归因到具体上游时走的是默认种子里的 brainz-chain 行：
+    /// 成本仍是 0，但它是一个「有价表行、有归属」的 0，而不是查不到价留下的空 0。
+    #[test]
+    fn chain_alias_prices_against_the_seeded_explicit_zero_row() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        UsageLogger::new(&db).log_with_calculation(
+            "req-seeded-chain".to_string(),
+            "brainz-proxy".to_string(),
+            "codex".to_string(),
+            "auto".to_string(),         // 上游回显的模型
+            "brainz-chain".to_string(), // 请求侧模型
+            "auto".to_string(),         // 响应侧计价的默认模式
+            priced_usage("auto"),
+            Decimal::from_str("1").unwrap(),
+            10,
+            None,
+            200,
+            None,
+            None,
+            false,
+        )?;
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let (pricing_model, cost): (String, String) = conn.query_row(
+            "SELECT pricing_model, total_cost_usd FROM proxy_request_logs WHERE request_id = 'req-seeded-chain'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(
+            pricing_model, "brainz-chain",
+            "链式请求要落在 brainz-chain 行上，账目才有归属"
+        );
+        assert_eq!(Decimal::from_str(&cost).unwrap(), Decimal::ZERO);
+        Ok(())
+    }
+
+    /// 上游回显 `:free`（已确认免费）时显式记 0：既不落到同名的付费行，
+    /// 也不落进「查不到价」的省略路径。
+    #[test]
+    fn confirmed_free_upstream_logs_an_explicit_zero() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT OR REPLACE INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
+                 VALUES ('step-3.7-flash', 'Step 3.7 Flash', '10', '10')",
+                [],
+            )?;
+        }
+
+        UsageLogger::new(&db).log_with_calculation(
+            "req-free-upstream".to_string(),
+            "brainz-proxy".to_string(),
+            "codex".to_string(),
+            "stepfun/step-3.7-flash:free".to_string(),
+            "stepfun/step-3.7-flash:free".to_string(),
+            "stepfun/step-3.7-flash:free".to_string(),
+            priced_usage("stepfun/step-3.7-flash:free"),
+            Decimal::from_str("1").unwrap(),
+            10,
+            None,
+            200,
+            None,
+            None,
+            false,
+        )?;
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let (pricing_model, cost): (String, String) = conn.query_row(
+            "SELECT pricing_model, total_cost_usd FROM proxy_request_logs WHERE request_id = 'req-free-upstream'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(pricing_model, "stepfun/step-3.7-flash:free");
+        assert_eq!(
+            Decimal::from_str(&cost).unwrap(),
+            Decimal::ZERO,
+            "免费上游必须显式记 0，而不是按同名的付费行计价"
         );
         Ok(())
     }
